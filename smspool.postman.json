@@ -1,0 +1,1639 @@
+{
+	"info": {
+		"name": "SMSPool API",
+		"description": "This is the Postman directory for SMSPool in order to simplify your API needs.",
+		"schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+	},
+	"item": [
+		{
+			"name": "Rental",
+			"item": [
+				{
+					"name": "Retrieve Rental IDs",
+					"protocolProfileBehavior": {
+						"disabledSystemHeaders": {}
+					},
+					"request": {
+						"method": "POST",
+						"header": [
+							{
+								"key": "",
+								"value": "",
+								"type": "text"
+							}
+						],
+						"body": {
+							"mode": "formdata",
+							"formdata": [
+								{
+									"key": "key",
+									"value": "{{apikey}}",
+									"description": "Your API key",
+									"type": "default"
+								},
+								{
+									"key": "type",
+									"value": "1",
+									"description": "Choose whether the rental is extendable or not with a 0 or 1",
+									"type": "default"
+								}
+							]
+						},
+						"url": {
+							"raw": "https://api.smspool.net/rental/retrieve_all",
+							"protocol": "https",
+							"host": [
+								"api",
+								"smspool",
+								"net"
+							],
+							"path": [
+								"rental",
+								"retrieve_all"
+							]
+						}
+					},
+					"response": []
+				},
+				{
+					"name": "Order Rental",
+					"protocolProfileBehavior": {
+						"disabledSystemHeaders": {}
+					},
+					"request": {
+						"method": "POST",
+						"header": [
+							{
+								"key": "",
+								"value": "",
+								"type": "text"
+							}
+						],
+						"body": {
+							"mode": "formdata",
+							"formdata": [
+								{
+									"key": "key",
+									"value": "{{apikey}}",
+									"type": "default"
+								},
+								{
+									"key": "id",
+									"value": "1",
+									"description": "Rental ID retrieved from Retrieve Rental IDs",
+									"type": "default"
+								},
+								{
+									"key": "days",
+									"value": "30",
+									"type": "text"
+								},
+								{
+									"key": "service_id",
+									"value": "",
+									"description": "Optional value on which service you'd purchase the rental for",
+									"type": "text"
+								}
+							]
+						},
+						"url": {
+							"raw": "https://api.smspool.net/purchase/rental",
+							"protocol": "https",
+							"host": [
+								"api",
+								"smspool",
+								"net"
+							],
+							"path": [
+								"purchase",
+								"rental"
+							]
+						}
+					},
+					"response": []
+				},
+				{
+					"name": "Refund Rental",
+					"protocolProfileBehavior": {
+						"disabledSystemHeaders": {}
+					},
+					"request": {
+						"method": "POST",
+						"header": [
+							{
+								"key": "",
+								"value": "",
+								"type": "text"
+							}
+						],
+						"body": {
+							"mode": "formdata",
+							"formdata": [
+								{
+									"key": "key",
+									"value": "{{apikey}}",
+									"type": "default"
+								},
+								{
+									"key": "rental_code",
+									"value": "",
+									"description": "The retrieved rental code from the `Order rental` endpoint.",
+									"type": "default"
+								}
+							]
+						},
+						"url": {
+							"raw": "https://api.smspool.net/rental/refund",
+							"protocol": "https",
+							"host": [
+								"api",
+								"smspool",
+								"net"
+							],
+							"path": [
+								"rental",
+								"refund"
+							]
+						}
+					},
+					"response": []
+				},
+				{
+					"name": "Extend Rental",
+					"request": {
+						"method": "POST",
+						"header": [],
+						"body": {
+							"mode": "formdata",
+							"formdata": [
+								{
+									"key": "key",
+									"value": "{{apikey}}",
+									"type": "default"
+								},
+								{
+									"key": "days",
+									"value": "30",
+									"type": "default"
+								},
+								{
+									"key": "rental_code",
+									"value": "",
+									"description": "The retrieved rental code from the `Order rental` endpoint.",
+									"type": "default"
+								}
+							]
+						},
+						"url": {
+							"raw": "https://api.smspool.net/rental/extend",
+							"protocol": "https",
+							"host": [
+								"api",
+								"smspool",
+								"net"
+							],
+							"path": [
+								"rental",
+								"extend"
+							]
+						}
+					},
+					"response": []
+				},
+				{
+					"name": "Enable Auto Extend Rental",
+					"request": {
+						"method": "POST",
+						"header": [],
+						"body": {
+							"mode": "formdata",
+							"formdata": [
+								{
+									"key": "key",
+									"value": "{{apikey}}",
+									"type": "default"
+								},
+								{
+									"key": "rental_code",
+									"value": "",
+									"description": "The retrieved rental code from the `Order rental` endpoint.",
+									"type": "default"
+								}
+							]
+						},
+						"url": {
+							"raw": "https://api.smspool.net/rental/auto_extend",
+							"protocol": "https",
+							"host": [
+								"api",
+								"smspool",
+								"net"
+							],
+							"path": [
+								"rental",
+								"auto_extend"
+							]
+						}
+					},
+					"response": []
+				},
+				{
+					"name": "Rental History",
+					"request": {
+						"method": "POST",
+						"header": [],
+						"body": {
+							"mode": "formdata",
+							"formdata": [
+								{
+									"key": "key",
+									"value": "{{apikey}}",
+									"description": "Your API key",
+									"type": "default"
+								}
+							]
+						},
+						"url": {
+							"raw": "https://api.smspool.net/rental/history",
+							"protocol": "https",
+							"host": [
+								"api",
+								"smspool",
+								"net"
+							],
+							"path": [
+								"rental",
+								"history"
+							]
+						},
+						"description": "Retrieve a history of all your rental actions."
+					},
+					"response": []
+				},
+				{
+					"name": "Retrieve Rental Messages",
+					"protocolProfileBehavior": {
+						"disabledSystemHeaders": {}
+					},
+					"request": {
+						"method": "POST",
+						"header": [
+							{
+								"key": "",
+								"value": "",
+								"type": "text"
+							}
+						],
+						"body": {
+							"mode": "formdata",
+							"formdata": [
+								{
+									"key": "key",
+									"value": "{{apikey}}",
+									"type": "default"
+								},
+								{
+									"key": "rental_code",
+									"value": "",
+									"description": "The retrieved rental code from the `Order rental` endpoint.",
+									"type": "default"
+								}
+							]
+						},
+						"url": {
+							"raw": "https://api.smspool.net/rental/retrieve_messages",
+							"protocol": "https",
+							"host": [
+								"api",
+								"smspool",
+								"net"
+							],
+							"path": [
+								"rental",
+								"retrieve_messages"
+							]
+						}
+					},
+					"response": []
+				},
+				{
+					"name": "Retrieve Rental Status",
+					"protocolProfileBehavior": {
+						"disabledSystemHeaders": {}
+					},
+					"request": {
+						"method": "POST",
+						"header": [
+							{
+								"key": "",
+								"value": "",
+								"type": "text"
+							}
+						],
+						"body": {
+							"mode": "formdata",
+							"formdata": [
+								{
+									"key": "key",
+									"value": "{{apikey}}",
+									"type": "default"
+								},
+								{
+									"key": "rental_code",
+									"value": "",
+									"description": "The retrieved rental code from the `Order rental` endpoint.",
+									"type": "default"
+								}
+							]
+						},
+						"url": {
+							"raw": "https://api.smspool.net/rental/retrieve_status",
+							"protocol": "https",
+							"host": [
+								"api",
+								"smspool",
+								"net"
+							],
+							"path": [
+								"rental",
+								"retrieve_status"
+							]
+						}
+					},
+					"response": []
+				},
+				{
+					"name": "Retrieve Rental Services",
+					"protocolProfileBehavior": {
+						"disabledSystemHeaders": {}
+					},
+					"request": {
+						"method": "POST",
+						"header": [
+							{
+								"key": "",
+								"value": "",
+								"type": "text"
+							}
+						],
+						"body": {
+							"mode": "formdata",
+							"formdata": [
+								{
+									"key": "key",
+									"value": "{{apikey}}",
+									"type": "default"
+								},
+								{
+									"key": "rental",
+									"value": "1",
+									"description": "The rental ID retrieved from `Retrieve Rental IDs`",
+									"type": "default"
+								}
+							]
+						},
+						"url": {
+							"raw": "https://api.smspool.net/rental/retrieve_services",
+							"protocol": "https",
+							"host": [
+								"api",
+								"smspool",
+								"net"
+							],
+							"path": [
+								"rental",
+								"retrieve_services"
+							]
+						}
+					},
+					"response": []
+				},
+				{
+					"name": "Retrieve Active Rentals",
+					"request": {
+						"method": "POST",
+						"header": [],
+						"body": {
+							"mode": "formdata",
+							"formdata": [
+								{
+									"key": "key",
+									"value": "{{apikey}}",
+									"description": "Your API key",
+									"type": "default"
+								}
+							]
+						},
+						"url": {
+							"raw": "https://api.smspool.net/rental/retrieve",
+							"protocol": "https",
+							"host": [
+								"api",
+								"smspool",
+								"net"
+							],
+							"path": [
+								"rental",
+								"retrieve"
+							]
+						},
+						"description": "Retrieve a history of all your rental actions."
+					},
+					"response": []
+				},
+				{
+					"name": "Retrieve Rental Pricing",
+					"protocolProfileBehavior": {
+						"disabledSystemHeaders": {}
+					},
+					"request": {
+						"method": "POST",
+						"header": [
+							{
+								"key": "",
+								"value": "",
+								"type": "text"
+							}
+						],
+						"body": {
+							"mode": "formdata",
+							"formdata": [
+								{
+									"key": "key",
+									"value": "{{apikey}}",
+									"description": "Your API key (optional)",
+									"type": "default"
+								},
+								{
+									"key": "id",
+									"value": "1",
+									"description": "The rental ID retrieved from `Retrieve Rental IDs`",
+									"type": "default"
+								}
+							]
+						},
+						"url": {
+							"raw": "https://api.smspool.net/rental/retrieve_pricing",
+							"protocol": "https",
+							"host": [
+								"api",
+								"smspool",
+								"net"
+							],
+							"path": [
+								"rental",
+								"retrieve_pricing"
+							]
+						}
+					},
+					"response": []
+				},
+				{
+					"name": "Retrieve Rental Stock",
+					"protocolProfileBehavior": {
+						"disabledSystemHeaders": {}
+					},
+					"request": {
+						"method": "POST",
+						"header": [
+							{
+								"key": "",
+								"value": "",
+								"type": "text"
+							}
+						],
+						"body": {
+							"mode": "formdata",
+							"formdata": [
+								{
+									"key": "key",
+									"value": "{{apikey}}",
+									"description": "Your API key (optional)",
+									"type": "default"
+								},
+								{
+									"key": "id",
+									"value": "1",
+									"description": "The rental ID retrieved from `Retrieve Rental IDs`",
+									"type": "default"
+								},
+								{
+									"key": "days",
+									"value": "30",
+									"type": "text"
+								}
+							]
+						},
+						"url": {
+							"raw": "https://api.smspool.net/rental/stock",
+							"protocol": "https",
+							"host": [
+								"api",
+								"smspool",
+								"net"
+							],
+							"path": [
+								"rental",
+								"stock"
+							]
+						}
+					},
+					"response": []
+				},
+				{
+					"name": "Retrieve Rental Info",
+					"protocolProfileBehavior": {
+						"disabledSystemHeaders": {}
+					},
+					"request": {
+						"method": "POST",
+						"header": [
+							{
+								"key": "",
+								"value": "",
+								"type": "text"
+							}
+						],
+						"body": {
+							"mode": "formdata",
+							"formdata": [
+								{
+									"key": "key",
+									"value": "{{apikey}}",
+									"type": "default"
+								},
+								{
+									"key": "rental_code",
+									"value": "",
+									"description": "The retrieved rental code from the `Order rental` endpoint.",
+									"type": "default"
+								}
+							]
+						},
+						"url": {
+							"raw": "https://api.smspool.net/rental/info",
+							"protocol": "https",
+							"host": [
+								"api",
+								"smspool",
+								"net"
+							],
+							"path": [
+								"rental",
+								"info"
+							]
+						},
+						"description": "Retrieve rental information"
+					},
+					"response": []
+				}
+			],
+			"description": "All endpoints for long-term orders"
+		},
+		{
+			"name": "SMS",
+			"item": [
+				{
+					"name": "Order SMS",
+					"request": {
+						"method": "POST",
+						"header": [],
+						"body": {
+							"mode": "formdata",
+							"formdata": [
+								{
+									"key": "key",
+									"value": "{{apikey}}",
+									"type": "default"
+								},
+								{
+									"key": "country",
+									"value": "US",
+									"description": "The country in ISO format or number retrieved from the `Country List` endpoint",
+									"type": "default"
+								},
+								{
+									"key": "service",
+									"value": "1",
+									"description": "The service or number retrieved from the `Service List` endpoint",
+									"type": "default"
+								},
+								{
+									"key": "pool",
+									"value": "",
+									"description": "The pool or number retrieved from the `Pool List` endpoint (optional)",
+									"type": "text"
+								},
+								{
+									"key": "max_price",
+									"value": "",
+									"description": "The max price you are willing to pay per number",
+									"type": "default"
+								},
+								{
+									"key": "pricing_option",
+									"value": "",
+									"description": "Set to 0 if you'd like the cheapest numbers, set to 1 for highest success rate",
+									"type": "default"
+								},
+								{
+									"key": "quantity",
+									"value": "",
+									"description": "Quantity of numbers ordered",
+									"type": "default"
+								},
+								{
+									"key": "areacode",
+									"value": "[123]",
+									"description": "Areacodes you would like to include or exclude in JSON format",
+									"type": "default"
+								},
+								{
+									"key": "exclude",
+									"value": "",
+									"description": "Set exclude to 1 if you would like to exclude all listed area codes.",
+									"type": "default"
+								},
+								{
+									"key": "create_token",
+									"value": "",
+									"description": "Optional param; set to 1 if you'd like to create a token link that anyone can access.",
+									"type": "text"
+								}
+							]
+						},
+						"url": {
+							"raw": "https://api.smspool.net/purchase/sms",
+							"protocol": "https",
+							"host": [
+								"api",
+								"smspool",
+								"net"
+							],
+							"path": [
+								"purchase",
+								"sms"
+							]
+						}
+					},
+					"response": []
+				},
+				{
+					"name": "Check SMS",
+					"request": {
+						"method": "POST",
+						"header": [],
+						"body": {
+							"mode": "formdata",
+							"formdata": [
+								{
+									"key": "orderid",
+									"value": ""
+								},
+								{
+									"key": "key",
+									"value": "{{apikey}}"
+								}
+							]
+						},
+						"url": {
+							"raw": "https://api.smspool.net/sms/check",
+							"protocol": "https",
+							"host": [
+								"api",
+								"smspool",
+								"net"
+							],
+							"path": [
+								"sms",
+								"check"
+							]
+						}
+					},
+					"response": []
+				},
+				{
+					"name": "Cancel SMS",
+					"request": {
+						"method": "POST",
+						"header": [],
+						"body": {
+							"mode": "formdata",
+							"formdata": [
+								{
+									"key": "orderid",
+									"value": ""
+								},
+								{
+									"key": "key",
+									"value": "{{apikey}}"
+								}
+							]
+						},
+						"url": {
+							"raw": "https://api.smspool.net/sms/cancel",
+							"protocol": "https",
+							"host": [
+								"api",
+								"smspool",
+								"net"
+							],
+							"path": [
+								"sms",
+								"cancel"
+							]
+						},
+						"description": "# Cancel your SMS order\n\n## Responses\n\n| **Success** | {\"success\":1} |\n| **Fail** | {\"success\":0} |"
+					},
+					"response": []
+				},
+				{
+					"name": "Cancel All SMS",
+					"request": {
+						"method": "POST",
+						"header": [],
+						"body": {
+							"mode": "formdata",
+							"formdata": [
+								{
+									"key": "key",
+									"value": "{{apikey}}"
+								}
+							]
+						},
+						"url": {
+							"raw": "https://api.smspool.net/sms/cancel_all",
+							"protocol": "https",
+							"host": [
+								"api",
+								"smspool",
+								"net"
+							],
+							"path": [
+								"sms",
+								"cancel_all"
+							]
+						},
+						"description": "# Cancel your SMS order\n\n## Responses\n\n| **Success** | {\"success\":1} |\n| **Fail** | {\"success\":0} |"
+					},
+					"response": []
+				},
+				{
+					"name": "Activate SMS",
+					"request": {
+						"method": "POST",
+						"header": [],
+						"body": {
+							"mode": "formdata",
+							"formdata": [
+								{
+									"key": "orderid",
+									"value": ""
+								},
+								{
+									"key": "key",
+									"value": "{{apikey}}"
+								}
+							]
+						},
+						"url": {
+							"raw": "https://api.smspool.net/sms/activate",
+							"protocol": "https",
+							"host": [
+								"api",
+								"smspool",
+								"net"
+							],
+							"path": [
+								"sms",
+								"activate"
+							]
+						},
+						"description": "This endpoint will forcefully activate an SMS to set it available for future resends, please keep in mind that these orders are NOT eligible for a refund after activating them."
+					},
+					"response": []
+				},
+				{
+					"name": "Reactivate SMS",
+					"request": {
+						"method": "POST",
+						"header": [],
+						"body": {
+							"mode": "formdata",
+							"formdata": [
+								{
+									"key": "orderid",
+									"value": ""
+								},
+								{
+									"key": "key",
+									"value": "{{apikey}}"
+								}
+							]
+						},
+						"url": {
+							"raw": "https://api.smspool.net/sms/reactivate",
+							"protocol": "https",
+							"host": [
+								"api",
+								"smspool",
+								"net"
+							],
+							"path": [
+								"sms",
+								"reactivate"
+							]
+						},
+						"description": "This endpoint will reactivate an order, please keep in mind that these orders are NOT eligible for a refund after activating them."
+					},
+					"response": []
+				},
+				{
+					"name": "Active orders",
+					"request": {
+						"method": "POST",
+						"header": [],
+						"body": {
+							"mode": "formdata",
+							"formdata": [
+								{
+									"key": "key",
+									"value": "{{apikey}}"
+								}
+							]
+						},
+						"url": {
+							"raw": "https://api.smspool.net/request/active",
+							"protocol": "https",
+							"host": [
+								"api",
+								"smspool",
+								"net"
+							],
+							"path": [
+								"request",
+								"active"
+							]
+						}
+					},
+					"response": []
+				},
+				{
+					"name": "Archive all orders",
+					"request": {
+						"method": "POST",
+						"header": [],
+						"body": {
+							"mode": "formdata",
+							"formdata": [
+								{
+									"key": "key",
+									"value": "{{apikey}}"
+								}
+							]
+						},
+						"url": {
+							"raw": "https://api.smspool.net/request/archive",
+							"protocol": "https",
+							"host": [
+								"api",
+								"smspool",
+								"net"
+							],
+							"path": [
+								"request",
+								"archive"
+							]
+						},
+						"description": "This API endpoint is used to archive a request in the SMS Pool system. The HTTP POST request should be sent to `https://api.smspool.net/request/archive`.\n\n### Request Parameters\n\nThe \\`key\\` parameter is required for this endpoint, this is your API key.\n\n### Response\n\nThe response for this API endpoint will have a status code of 200, indicating a successful request. The response body will be in JSON format and will contain the following properties:\n\n- `success` (integer): A flag indicating the success of the request. A value of 0 indicates failure.\n- `message` (string): An optional message providing additional information about the request. In this case, the message is empty.\n    \n\nPlease note that the response may contain additional properties not mentioned here, but they can be ignored for the purpose of this documentation."
+					},
+					"response": []
+				},
+				{
+					"name": "Check Resend",
+					"request": {
+						"method": "POST",
+						"header": [],
+						"body": {
+							"mode": "formdata",
+							"formdata": [
+								{
+									"key": "orderid",
+									"value": ""
+								},
+								{
+									"key": "key",
+									"value": "{{apikey}}"
+								}
+							]
+						},
+						"url": {
+							"raw": "https://api.smspool.net/sms/check_resend",
+							"protocol": "https",
+							"host": [
+								"api",
+								"smspool",
+								"net"
+							],
+							"path": [
+								"sms",
+								"check_resend"
+							]
+						},
+						"description": "Check if the order can be resent or not."
+					},
+					"response": []
+				},
+				{
+					"name": "Resend",
+					"request": {
+						"method": "POST",
+						"header": [],
+						"body": {
+							"mode": "formdata",
+							"formdata": [
+								{
+									"key": "orderid",
+									"value": ""
+								},
+								{
+									"key": "key",
+									"value": "{{apikey}}"
+								}
+							]
+						},
+						"url": {
+							"raw": "https://api.smspool.net/sms/resend",
+							"protocol": "https",
+							"host": [
+								"api",
+								"smspool",
+								"net"
+							],
+							"path": [
+								"sms",
+								"resend"
+							]
+						},
+						"description": "# Resend\n\n  \nResend the order. Keep in mind that some pools will have a charge per resend.\n\n## Responses\n\n| **Success** | {\"success\":1,\"message\":\"Number has been requested again\",\"resend\":0} |  \n| **Fail** | {\"success\":0,\"message\":\"Phonenumber could not be requested again, try later again.\",\"resend\":0} |"
+					},
+					"response": []
+				},
+				{
+					"name": "One-time SMS stock",
+					"request": {
+						"method": "POST",
+						"header": [],
+						"body": {
+							"mode": "formdata",
+							"formdata": [
+								{
+									"key": "key",
+									"value": "{{apikey}}"
+								},
+								{
+									"key": "country",
+									"value": "1",
+									"description": "Country retrieved from ''Country list\" endpoint",
+									"type": "text"
+								},
+								{
+									"key": "service",
+									"value": "1",
+									"description": "Service retrieved from ''Service list\" endpoint",
+									"type": "text"
+								},
+								{
+									"key": "pool",
+									"value": "7",
+									"description": "Pool retrieved from ''Pool list\" endpoint",
+									"type": "text"
+								}
+							]
+						},
+						"url": {
+							"raw": "https://api.smspool.net/sms/stock",
+							"protocol": "https",
+							"host": [
+								"api",
+								"smspool",
+								"net"
+							],
+							"path": [
+								"sms",
+								"stock"
+							]
+						},
+						"description": "This API endpoint is used to archive a request in the SMS Pool system. The HTTP POST request should be sent to `https://api.smspool.net/request/archive`.\n\n### Request Parameters\n\nThe \\`key\\` parameter is required for this endpoint, this is your API key.\n\n### Response\n\nThe response for this API endpoint will have a status code of 200, indicating a successful request. The response body will be in JSON format and will contain the following properties:\n\n- `success` (integer): A flag indicating the success of the request. A value of 0 indicates failure.\n- `message` (string): An optional message providing additional information about the request. In this case, the message is empty.\n    \n\nPlease note that the response may contain additional properties not mentioned here, but they can be ignored for the purpose of this documentation."
+					},
+					"response": []
+				},
+				{
+					"name": "Order History",
+					"request": {
+						"method": "POST",
+						"header": [],
+						"body": {
+							"mode": "formdata",
+							"formdata": [
+								{
+									"key": "key",
+									"value": "{{apikey}}"
+								},
+								{
+									"key": "start",
+									"value": "0",
+									"description": "Which row you'd like to start from",
+									"type": "text"
+								},
+								{
+									"key": "length",
+									"value": "1000",
+									"description": "Max length of all rows",
+									"type": "text"
+								},
+								{
+									"key": "search",
+									"value": "",
+									"description": "Search query for phone number, order_code, service or country",
+									"type": "text"
+								}
+							]
+						},
+						"url": {
+							"raw": "https://api.smspool.net/request/history",
+							"protocol": "https",
+							"host": [
+								"api",
+								"smspool",
+								"net"
+							],
+							"path": [
+								"request",
+								"history"
+							]
+						},
+						"description": "This API endpoint is used to retrieve the history of SMS requests. It is an HTTP POST request that should be made to the following URL: `https://api.smspool.net/request/history`.\n\nThe request requires the \\`key\\` parameter which is your API key.\n\nThe response returned by the API is a JSON array. Each element in the array represents a historical SMS request and contains the following properties:\n\n- `cost`: The cost of the SMS request.\n- `order_code`: The order code associated with the SMS request.\n- `phonenumber`: The phone number to which the SMS was sent.\n- `code`: The code associated with the SMS request.\n- `full_code`: The full code associated with the SMS request.\n- `short_name`: The short name associated with the SMS request.\n- `service`: The service associated with the SMS request.\n- `status`: The status of the SMS request.\n- `pool`: The pool associated with the SMS request.\n- `timestamp`: The timestamp of the SMS request.\n- `completed_on`: The completion date of the SMS request.\n- `expiry`: The expiry time of the SMS request.\n- `time_left`: The time left for the SMS request to expire.\n    \n\nPlease note that the values for the properties are not provided in the response example, so they may be empty or null.\n\nThe last execution of this API request returned a response with a status code of 200, indicating a successful execution. The response body contained an array of SMS request history objects.\n\nPlease refer to the API documentation for more details on how to use this endpoint and interpret the response."
+					},
+					"response": []
+				},
+				{
+					"name": "Retrieve SMS stock",
+					"request": {
+						"method": "POST",
+						"header": [],
+						"body": {
+							"mode": "formdata",
+							"formdata": [
+								{
+									"key": "service",
+									"value": "1",
+									"type": "text"
+								},
+								{
+									"key": "country",
+									"value": "1",
+									"type": "text"
+								}
+							]
+						},
+						"url": {
+							"raw": "https://api.smspool.net/sms/stock",
+							"protocol": "https",
+							"host": [
+								"api",
+								"smspool",
+								"net"
+							],
+							"path": [
+								"sms",
+								"stock"
+							]
+						}
+					},
+					"response": []
+				}
+			]
+		},
+		{
+			"name": "Preorders",
+			"item": [
+				{
+					"name": "Retrieve",
+					"request": {
+						"method": "POST",
+						"header": [],
+						"body": {
+							"mode": "formdata",
+							"formdata": [
+								{
+									"key": "key",
+									"value": "{{apikey}}",
+									"type": "default"
+								}
+							]
+						},
+						"url": {
+							"raw": "https://api.smspool.net/preorder/retrieve",
+							"protocol": "https",
+							"host": [
+								"api",
+								"smspool",
+								"net"
+							],
+							"path": [
+								"preorder",
+								"retrieve"
+							]
+						},
+						"description": "This API endpoint allows you to retrieve preorders from the SMS Pool system. It is an HTTP POST request sent to the URL `https://api.smspool.net/preorder/retrieve`.\n\n### Request Parameters\n\nThis endpoint requires the \\`key\\` parameter which is your API key."
+					},
+					"response": []
+				},
+				{
+					"name": "Check",
+					"request": {
+						"method": "POST",
+						"header": [],
+						"body": {
+							"mode": "formdata",
+							"formdata": [
+								{
+									"key": "key",
+									"value": "{{apikey}}",
+									"type": "default"
+								},
+								{
+									"key": "orderid",
+									"value": "",
+									"type": "default"
+								}
+							]
+						},
+						"url": {
+							"raw": "https://api.smspool.net/preorder/check",
+							"protocol": "https",
+							"host": [
+								"api",
+								"smspool",
+								"net"
+							],
+							"path": [
+								"preorder",
+								"check"
+							]
+						}
+					},
+					"response": []
+				},
+				{
+					"name": "Cancel",
+					"request": {
+						"method": "POST",
+						"header": [],
+						"body": {
+							"mode": "formdata",
+							"formdata": [
+								{
+									"key": "key",
+									"value": "{{apikey}}",
+									"type": "default"
+								}
+							]
+						},
+						"url": {
+							"raw": "https://api.smspool.net/preorder/cancel",
+							"protocol": "https",
+							"host": [
+								"api",
+								"smspool",
+								"net"
+							],
+							"path": [
+								"preorder",
+								"cancel"
+							]
+						}
+					},
+					"response": []
+				},
+				{
+					"name": "Create",
+					"request": {
+						"method": "POST",
+						"header": [],
+						"body": {
+							"mode": "formdata",
+							"formdata": [
+								{
+									"key": "key",
+									"value": "{{apikey}}",
+									"type": "default"
+								}
+							]
+						},
+						"url": {
+							"raw": "https://api.smspool.net/preorder/create",
+							"protocol": "https",
+							"host": [
+								"api",
+								"smspool",
+								"net"
+							],
+							"path": [
+								"preorder",
+								"create"
+							]
+						}
+					},
+					"response": []
+				}
+			]
+		},
+		{
+			"name": "Pricing",
+			"item": [
+				{
+					"name": "Retrieve all pricing",
+					"request": {
+						"method": "POST",
+						"header": [],
+						"body": {
+							"mode": "formdata",
+							"formdata": [
+								{
+									"key": "key",
+									"value": "{{apikey}}",
+									"description": "Optional API key",
+									"type": "text"
+								}
+							]
+						},
+						"url": {
+							"raw": "https://api.smspool.net/request/pricing",
+							"protocol": "https",
+							"host": [
+								"api",
+								"smspool",
+								"net"
+							],
+							"path": [
+								"request",
+								"pricing"
+							]
+						}
+					},
+					"response": []
+				},
+				{
+					"name": "Retrieve specific price & Success Rate",
+					"request": {
+						"method": "POST",
+						"header": [],
+						"body": {
+							"mode": "formdata",
+							"formdata": [
+								{
+									"key": "key",
+									"value": "{{apikey}}",
+									"description": "Optional API key",
+									"type": "text"
+								},
+								{
+									"key": "country",
+									"value": "1",
+									"description": "Country retrieved from ''Country list\" endpoint",
+									"type": "text"
+								},
+								{
+									"key": "service",
+									"value": "1",
+									"description": "Service retrieved from ''Service list\" endpoint",
+									"type": "text"
+								},
+								{
+									"key": "pool",
+									"value": "7",
+									"description": "Pool retrieved from ''Pool list\" endpoint",
+									"type": "text"
+								}
+							]
+						},
+						"url": {
+							"raw": "https://api.smspool.net/request/price",
+							"protocol": "https",
+							"host": [
+								"api",
+								"smspool",
+								"net"
+							],
+							"path": [
+								"request",
+								"price"
+							]
+						}
+					},
+					"response": []
+				}
+			]
+		},
+		{
+			"name": "Informative endpoints",
+			"item": [
+				{
+					"name": "Retrieve country success rates per service",
+					"protocolProfileBehavior": {
+						"disableBodyPruning": true
+					},
+					"request": {
+						"method": "GET",
+						"header": [],
+						"body": {
+							"mode": "formdata",
+							"formdata": [
+								{
+									"key": "service",
+									"value": "1"
+								}
+							]
+						},
+						"url": {
+							"raw": "https://api.smspool.net/request/success_rate?service=1",
+							"protocol": "https",
+							"host": [
+								"api",
+								"smspool",
+								"net"
+							],
+							"path": [
+								"request",
+								"success_rate"
+							],
+							"query": [
+								{
+									"key": "service",
+									"value": "1"
+								}
+							]
+						},
+						"description": "This API endpoint is used to retrieve suggested countries for SMS pool requests. It sends an HTTP POST request to the URL `https://api.smspool.net/request/suggested_countries`.\n\nPlease use either the service ID, or the service name as service param."
+					},
+					"response": []
+				},
+				{
+					"name": "Balance",
+					"request": {
+						"method": "POST",
+						"header": [],
+						"body": {
+							"mode": "formdata",
+							"formdata": [
+								{
+									"key": "key",
+									"value": "{{apikey}}"
+								}
+							]
+						},
+						"url": {
+							"raw": "https://api.smspool.net/request/balance",
+							"protocol": "https",
+							"host": [
+								"api",
+								"smspool",
+								"net"
+							],
+							"path": [
+								"request",
+								"balance"
+							]
+						},
+						"description": "This HTTP POST request is used to retrieve the balance for a specific SMS pool. The request is sent to the URL `https://api.smspool.net/request/balance`.\n\n### Request Parameters\n\nThis request require the \\`key\\` param which is your API key\n\n### Response\n\nThe response to this request will have a status code of 200 if the request is successful. The response body will be in JSON format and will include a `balance` field. However, the last execution of this request returned an empty string for the `balance` field.\n\nPlease note that the actual value of the `balance` field may vary depending on the user and its configuration."
+					},
+					"response": []
+				},
+				{
+					"name": "Suggested Countries",
+					"request": {
+						"method": "POST",
+						"header": [],
+						"body": {
+							"mode": "formdata",
+							"formdata": [
+								{
+									"key": "service",
+									"value": "1"
+								}
+							]
+						},
+						"url": {
+							"raw": "https://api.smspool.net/request/suggested_countries",
+							"protocol": "https",
+							"host": [
+								"api",
+								"smspool",
+								"net"
+							],
+							"path": [
+								"request",
+								"suggested_countries"
+							]
+						},
+						"description": "This API endpoint is used to retrieve suggested countries for SMS pool requests. It sends an HTTP POST request to the URL `https://api.smspool.net/request/suggested_countries`.\n\nPlease use either the service ID, or the service name as service param."
+					},
+					"response": []
+				},
+				{
+					"name": "Suggested Pools",
+					"request": {
+						"method": "POST",
+						"header": [],
+						"body": {
+							"mode": "formdata",
+							"formdata": [
+								{
+									"key": "service",
+									"value": "395",
+									"description": "Service retrieved from ''Service list\" endpoint"
+								},
+								{
+									"key": "country",
+									"value": "2",
+									"description": "Country retrieved from ''Country list\" endpoint",
+									"type": "text"
+								},
+								{
+									"key": "web",
+									"value": "1",
+									"description": "Return array format",
+									"type": "text"
+								}
+							]
+						},
+						"url": {
+							"raw": "https://api.smspool.net/pool/retrieve_valid",
+							"protocol": "https",
+							"host": [
+								"api",
+								"smspool",
+								"net"
+							],
+							"path": [
+								"pool",
+								"retrieve_valid"
+							]
+						},
+						"description": "This API endpoint is used to retrieve suggested countries for SMS pool requests. It sends an HTTP POST request to the URL `https://api.smspool.net/request/suggested_countries`.\n\nPlease use either the service ID, or the service name as service param."
+					},
+					"response": []
+				},
+				{
+					"name": "Country list",
+					"request": {
+						"method": "POST",
+						"header": [],
+						"body": {
+							"mode": "formdata",
+							"formdata": []
+						},
+						"url": {
+							"raw": "https://api.smspool.net/country/retrieve_all",
+							"protocol": "https",
+							"host": [
+								"api",
+								"smspool",
+								"net"
+							],
+							"path": [
+								"country",
+								"retrieve_all"
+							]
+						},
+						"description": "This API endpoint is used to retrieve suggested countries for SMS pool requests. It sends an HTTP POST request to the URL `https://api.smspool.net/request/suggested_countries`.\n\nPlease use either the service ID, or the service name as service param."
+					},
+					"response": []
+				},
+				{
+					"name": "Service list",
+					"request": {
+						"method": "POST",
+						"header": [],
+						"body": {
+							"mode": "formdata",
+							"formdata": []
+						},
+						"url": {
+							"raw": "https://api.smspool.net/service/retrieve_all",
+							"protocol": "https",
+							"host": [
+								"api",
+								"smspool",
+								"net"
+							],
+							"path": [
+								"service",
+								"retrieve_all"
+							]
+						},
+						"description": "This API endpoint is used to retrieve suggested countries for SMS pool requests. It sends an HTTP POST request to the URL `https://api.smspool.net/request/suggested_countries`.\n\nPlease use either the service ID, or the service name as service param."
+					},
+					"response": []
+				},
+				{
+					"name": "Pool list",
+					"request": {
+						"method": "POST",
+						"header": [],
+						"body": {
+							"mode": "formdata",
+							"formdata": []
+						},
+						"url": {
+							"raw": "https://api.smspool.net/pool/retrieve_all",
+							"protocol": "https",
+							"host": [
+								"api",
+								"smspool",
+								"net"
+							],
+							"path": [
+								"pool",
+								"retrieve_all"
+							]
+						},
+						"description": "This API endpoint is used to retrieve suggested countries for SMS pool requests. It sends an HTTP POST request to the URL `https://api.smspool.net/request/suggested_countries`.\n\nPlease use either the service ID, or the service name as service param."
+					},
+					"response": []
+				}
+			],
+			"description": "All informative endpoints used in order to request extra information that were not categorized by the previous folders."
+		},
+		{
+			"name": "Carrier",
+			"item": [
+				{
+					"name": "Lookup",
+					"request": {
+						"method": "POST",
+						"header": [],
+						"body": {
+							"mode": "formdata",
+							"formdata": [
+								{
+									"key": "key",
+									"value": "{{apikey}}"
+								},
+								{
+									"key": "phonenumber",
+									"value": "123456789",
+									"type": "text"
+								}
+							]
+						},
+						"url": {
+							"raw": "https://api.smspool.net/carrier/paid_lookup",
+							"protocol": "https",
+							"host": [
+								"api",
+								"smspool",
+								"net"
+							],
+							"path": [
+								"carrier",
+								"paid_lookup"
+							]
+						},
+						"description": "This API endpoint is used to perform a paid lookup for a phone number. The request is sent via an HTTP POST method to the following URL: `https://api.smspool.net/carrier/paid_lookup`\n\n``` json\n{\n  \"success\": true,\n  \"phonenumber\": \"\",\n  \"country\": \"\",\n  \"carrier\": \"\",\n  \"carrier_type\": \"\",\n  \"charge\": 0\n}\n\n ```\n\nThe `success` field indicates whether the lookup was successful or not. The `phonenumber` field represents the phone number for which the lookup was performed. The `country` field indicates the country associated with the phone number. The `carrier` field provides the name of the carrier associated with the phone number. The `carrier_type` field specifies the type of carrier. The `charge` field represents the cost charged for the lookup operation.\n\nPlease note that specific values for `phonenumber`, `country`, `carrier`, and `carrier_type` were not provided in the response, and the `charge` field had a value of 0.\n\nTo use this endpoint, send an HTTP POST request to the provided URL with the necessary parameters. The request should include the phone number for which you want to perform the lookup. The response will contain the details of the carrier and associated information.\n\nMake sure to handle any errors that may occur during the lookup process and check the `success` field in the response to determine the outcome of the operation."
+					},
+					"response": []
+				}
+			]
+		}
+	],
+	"event": [
+		{
+			"listen": "prerequest",
+			"script": {
+				"type": "text/javascript",
+				"exec": [
+					""
+				]
+			}
+		},
+		{
+			"listen": "test",
+			"script": {
+				"type": "text/javascript",
+				"exec": [
+					""
+				]
+			}
+		}
+	],
+	"variable": [
+		{
+			"key": "apikey",
+			"value": "Your API key",
+			"type": "default"
+		}
+	]
+}
