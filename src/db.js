@@ -16,7 +16,8 @@ export const DEFAULT_CONFIG = {
   maxPrice: process.env.DEFAULT_MAX_PRICE || '',
   pricingOption: process.env.DEFAULT_PRICING_OPTION || '',
   maxAccountUses: Number(process.env.MAX_ACCOUNT_USES || 3),
-  timeoutSeconds: Number(process.env.TIMEOUT_SECONDS || 120),
+  timeoutSeconds: Number(process.env.TIMEOUT_SECONDS || 300),
+  changeNumberAfterSeconds: Number(process.env.CHANGE_NUMBER_AFTER_SECONDS || 120),
   pollIntervalSeconds: Number(process.env.POLL_INTERVAL_SECONDS || 5),
   mockMode: ['true','1','yes'].includes(String(process.env.MOCK_SMSPOOL || '').toLowerCase()),
   mockReceiveAfterChecks: Number(process.env.MOCK_RECEIVE_AFTER_CHECKS || 2),
@@ -41,6 +42,8 @@ function normalizeDb(db) {
   db.config = { ...DEFAULT_CONFIG, ...(db.config || {}) };
   if (process.env.MOCK_SMSPOOL) db.config.mockMode = ['true','1','yes'].includes(String(process.env.MOCK_SMSPOOL).toLowerCase());
   if (process.env.MOCK_RECEIVE_AFTER_CHECKS) db.config.mockReceiveAfterChecks = Number(process.env.MOCK_RECEIVE_AFTER_CHECKS);
+  if (process.env.TIMEOUT_SECONDS) db.config.timeoutSeconds = Number(process.env.TIMEOUT_SECONDS);
+  if (process.env.CHANGE_NUMBER_AFTER_SECONDS) db.config.changeNumberAfterSeconds = Number(process.env.CHANGE_NUMBER_AFTER_SECONDS);
   db.cdks ||= [];
   db.accounts ||= [];
   db.sessions ||= [];

@@ -189,19 +189,31 @@ function publicSession(session, account, { admin = false, revealPhone = false } 
   };
 }
 
+function addSecondsIsoFrom(iso, seconds) {
+  return new Date(new Date(iso).getTime() + Number(seconds) * 1000).toISOString();
+}
+
 function frontendAccount(account) {
   return {
     phone: account?.phone || '',
   };
 }
 
-function frontendSession(session) {
+function frontendSession(session, config = readDb().config) {
   return {
     id: session.id,
     status: session.status,
     deadlineAt: session.deadlineAt,
+    canChangeAt: addSecondsIsoFrom(session.createdAt, config.changeNumberAfterSeconds || 120),
+    canChange: canChangeSession(session, config),
     message: session.message ? { text: session.message.text || '' } : null,
   };
+}
+
+function canChangeSession(session, config) {
+  if (!session || session.status !== 'waiting' || session.counted) return false;
+  const seconds = Number(config.changeNumberAfterSeconds || 120);
+  return Date.now() >= new Date(session.createdAt).getTime() + seconds * 1000;
 }
 
 function frontendRecord(session, account) {
@@ -213,10 +225,10 @@ function frontendRecord(session, account) {
   };
 }
 
-function frontendSessionPayload(session, account) {
+function frontendSessionPayload(session, account, config = readDb().config) {
   return {
     account: frontendAccount(account),
-    session: frontendSession(session),
+    session: frontendSession(session, config),
     reused: !!session?.reused,
   };
 }
@@ -581,7 +593,7 @@ app.post('/api/cdk/redeem', requireSameOrigin, async (req, res, next) => {
       success: 1,
       ...frontendSessionPayload(allocated.session, allocated.account),
       sessionToken: allocated.sessionToken,
-      config: { timeoutSeconds: readDb().config.timeoutSeconds, pollIntervalSeconds: readDb().config.pollIntervalSeconds },
+      config: { timeoutSeconds: readDb().config.timeoutSeconds, changeNumberAfterSeconds: readDb().config.changeNumberAfterSeconds, pollIntervalSeconds: readDb().config.pollIntervalSeconds },
     });
   } catch (e) { next(e); }
 });
@@ -697,6 +709,9 @@ app.post('/api/session/change-number', requireSameOrigin, async (req, res, next)
     const oldCdk = snapshot.cdks.find(c => c.code.toUpperCase() === oldSession.cdk.toUpperCase());
     if (!oldCdk || !(((oldCdk.status || 'active') === 'reserved' && oldCdk.reservedSessionId === oldSession.id) || (oldCdk.status || 'active') === 'active')) return res.status(400).json({ success: 0, message: 'CDK 不可用' });
     if (oldSession.status === 'received' || oldSession.counted) return res.status(400).json({ success: 0, message: '已收到短信，不能更换号码' });
+    if (oldSession.status === 'waiting' && !canChangeSession(oldSession, snapshot.config)) {
+      return res.status(400).json({ success: 0, message: '等待满 2 分钟后才能更换号码' });
+    }
 
     transact(db => {
       const s = db.sessions.find(x => x.id === oldId);
@@ -715,7 +730,7 @@ app.post('/api/session/change-number', requireSameOrigin, async (req, res, next)
     }
 
     const allocated = await allocateSession(oldSession.cdk.toUpperCase());
-    res.json({ success: 1, ...frontendSessionPayload(allocated.session, allocated.account), sessionToken: allocated.sessionToken, config: { timeoutSeconds: readDb().config.timeoutSeconds, pollIntervalSeconds: readDb().config.pollIntervalSeconds } });
+    res.json({ success: 1, ...frontendSessionPayload(allocated.session, allocated.account), sessionToken: allocated.sessionToken, config: { timeoutSeconds: readDb().config.timeoutSeconds, changeNumberAfterSeconds: readDb().config.changeNumberAfterSeconds, pollIntervalSeconds: readDb().config.pollIntervalSeconds } });
   } catch (e) { next(e); }
 });
 
@@ -758,11 +773,11 @@ app.get('/api/admin/overview', requireAdmin, async (req, res) => {
 });
 
 app.post('/api/admin/config', requireSameOrigin, requireAdmin, (req, res) => {
-  const allowed = ['apiKey', 'country', 'service', 'pool', 'maxPrice', 'pricingOption', 'maxAccountUses', 'timeoutSeconds', 'pollIntervalSeconds', 'mockMode', 'mockReceiveAfterChecks', 'purchaseEnabled', 'purchaseUrl', 'purchaseTextZh', 'purchaseTextEn', 'resendCooldownSeconds'];
+  const allowed = ['apiKey', 'country', 'service', 'pool', 'maxPrice', 'pricingOption', 'maxAccountUses', 'timeoutSeconds', 'changeNumberAfterSeconds', 'pollIntervalSeconds', 'mockMode', 'mockReceiveAfterChecks', 'purchaseEnabled', 'purchaseUrl', 'purchaseTextZh', 'purchaseTextEn', 'resendCooldownSeconds'];
   const updated = transact(db => {
     for (const k of allowed) {
       if (req.body[k] !== undefined) {
-        if (['maxAccountUses', 'timeoutSeconds', 'pollIntervalSeconds', 'mockReceiveAfterChecks', 'resendCooldownSeconds'].includes(k)) db.config[k] = Number(req.body[k]);
+        if (['maxAccountUses', 'timeoutSeconds', 'changeNumberAfterSeconds', 'pollIntervalSeconds', 'mockReceiveAfterChecks', 'resendCooldownSeconds'].includes(k)) db.config[k] = Number(req.body[k]);
         else if (k === 'mockMode' || k === 'purchaseEnabled') db.config[k] = req.body[k] === true || req.body[k] === 'true' || req.body[k] === '1' || req.body[k] === 'on';
         else if (k === 'apiKey' && String(req.body[k]) === '********') continue;
         else if (k === 'apiKey') db.config[k] = storeApiKey(String(req.body[k] ?? ''));
@@ -817,7 +832,7 @@ app.post('/api/sms/stock', requireAdmin, async (req, res, next) => { try { res.j
 app.use((err, req, res, next) => {
   const status = err.status || (err instanceof SmsPoolError ? err.status : 500);
   const isAdminReq = req.path.startsWith('/api/admin');
-  const safeClientMessages = ['请输入 CDK','CDK 不可用','已收到短信，不能更换号码','会话不存在','号码不存在','无权访问该会话','已超时，可以更换号码'];
+  const safeClientMessages = ['请输入 CDK','CDK 不可用','已收到短信，不能更换号码','等待满 2 分钟后才能更换号码','会话不存在','号码不存在','无权访问该会话','已超时，可以更换号码'];
   const msg = isAdminReq || err.publicMessage || safeClientMessages.includes(err.message) ? (err.message || 'server error') : '服务暂时不可用，请稍后再试';
   if (!isAdminReq) { try { transact(db => audit(db, req, 'frontend.error', { path: req.path, status, message: err.message, details: err.details || null })); } catch {} }
   res.status(status).json({ success: 0, message: msg, details: isAdminReq && err.details ? scrubSensitive(err.details) : undefined });
@@ -851,6 +866,22 @@ transact(db => {
   }
   if (changed) audit(db, null, 'system.cleanup_false_received');
 });
+
+
+function cleanupExpiredWaitingSessions() {
+  try {
+    const db = readDb();
+    const config = getRuntimeConfig(db);
+    if (expireStaleWaitingSessions(db, config)) {
+      audit(db, null, 'system.expired_waiting_cleanup');
+      writeDb(db);
+    }
+  } catch (e) {
+    console.error('expired waiting cleanup failed:', e.message);
+  }
+}
+cleanupExpiredWaitingSessions();
+setInterval(cleanupExpiredWaitingSessions, Number(process.env.WAITING_CLEANUP_INTERVAL_SECONDS || 30) * 1000).unref?.();
 
 app.listen(PORT, HOST, () => {
   console.log(`GPTSMS front site running: http://${HOST}:${PORT}/`);
