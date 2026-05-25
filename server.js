@@ -6,7 +6,7 @@ import helmet from 'helmet';
 import rateLimit from 'express-rate-limit';
 import cookieParser from 'cookie-parser';
 import dotenv from 'dotenv';
-import { transact, readDb, makeId, makeCdk, nowIso, addSecondsIso, safeConfig, getRuntimeConfig, storeApiKey } from './src/db.js';
+import { transact, readDb, writeDb, makeId, makeCdk, nowIso, addSecondsIso, safeConfig, getRuntimeConfig, storeApiKey } from './src/db.js';
 import { getBalance, listCountries, listServices, listPools, getPrice, getStock, purchaseSms, checkSms, cancelSms, resendSms, retrieveValidPools, SmsPoolError } from './src/smspool.js';
 
 dotenv.config();
@@ -217,6 +217,7 @@ function frontendSessionPayload(session, account) {
   return {
     account: frontendAccount(account),
     session: frontendSession(session),
+    reused: !!session?.reused,
   };
 }
 
@@ -285,22 +286,106 @@ function extractMessage(data) {
   return null;
 }
 
-function findReusableAccount(db, config) {
-  const maxUses = Number(config.maxAccountUses || 3);
+const REUSE_POOL_THRESHOLD = Number(process.env.REUSE_POOL_THRESHOLD || 10);
+const SUCCESSFUL_REUSE_THRESHOLD = Number(process.env.SUCCESSFUL_REUSE_THRESHOLD || 5);
+const BUSY_ACCOUNT_STATUSES = new Set(['waiting', 'resending']);
+const TERMINAL_ACCOUNT_STATUSES = new Set(['failed', 'refunded', 'used_up']);
+
+function accountMaxUses(account, config) {
+  return Number(account?.maxUses || config.maxAccountUses || 3);
+}
+
+function accountMatchesConfig(account, config) {
   const configuredPool = String(config.pool || '').trim();
   const poolMatches = (accountPool) => !configuredPool || configuredPool.toLowerCase() === 'auto' || String(accountPool || '') === configuredPool;
-  return db.accounts
-    .filter(a =>
-      String(a.country) === String(config.country) &&
-      String(a.service) === String(config.service) &&
-      poolMatches(a.pool) &&
-      ['available', 'resend_failed'].includes(String(a.status || 'available')) &&
-      (!a.resendCooldownUntil || Date.now() > new Date(a.resendCooldownUntil).getTime()) &&
-      Number(a.useCount || 0) > 0 &&
-      Number(a.useCount || 0) < Number(a.maxUses || maxUses) &&
-      a.orderid
-    )
+  return String(account.country) === String(config.country) &&
+    String(account.service) === String(config.service) &&
+    poolMatches(account.pool);
+}
+
+function countReusablePoolAccounts(db, config) {
+  return db.accounts.filter(a =>
+    accountMatchesConfig(a, config) &&
+    a.orderid &&
+    !TERMINAL_ACCOUNT_STATUSES.has(String(a.status || 'available')) &&
+    Number(a.useCount || 0) < accountMaxUses(a, config)
+  ).length;
+}
+
+function reusableSuccessfulAccounts(db, config) {
+  return db.accounts.filter(a =>
+    accountMatchesConfig(a, config) &&
+    ['available', 'resend_failed'].includes(String(a.status || 'available')) &&
+    !BUSY_ACCOUNT_STATUSES.has(String(a.status || 'available')) &&
+    (!a.resendCooldownUntil || Date.now() > new Date(a.resendCooldownUntil).getTime()) &&
+    Number(a.useCount || 0) > 0 &&
+    Number(a.useCount || 0) < accountMaxUses(a, config) &&
+    a.orderid
+  );
+}
+
+function isRetryCdk(db, cdkCode) {
+  return db.sessions.some(s => String(s.cdk || '').toUpperCase() === cdkCode && ['timeout', 'changed'].includes(String(s.status || '')));
+}
+
+function findReusableAccount(db, config, { cdkCode = '', forceReuse = false } = {}) {
+  const successfulAccounts = reusableSuccessfulAccounts(db, config);
+  const shouldPreferSuccessful = forceReuse || isRetryCdk(db, cdkCode) || successfulAccounts.length > SUCCESSFUL_REUSE_THRESHOLD;
+
+  // Normal path: keep buying fresh numbers until the matching, still-usable pool grows past
+  // REUSE_POOL_THRESHOLD. Retry CDKs, or a proven-successful pool of >5 numbers, prefer resend.
+  if (!shouldPreferSuccessful && countReusablePoolAccounts(db, config) <= REUSE_POOL_THRESHOLD) return null;
+
+  return successfulAccounts
     .sort((a, b) => Number(b.useCount || 0) - Number(a.useCount || 0) || String(a.createdAt).localeCompare(String(b.createdAt)))[0];
+}
+
+function expireStaleWaitingSessions(db, config) {
+  const now = Date.now();
+  let changed = false;
+  for (const session of db.sessions || []) {
+    if (session.status !== 'waiting') continue;
+    if (!session.deadlineAt || now <= new Date(session.deadlineAt).getTime()) continue;
+
+    const account = db.accounts.find(a => a.id === session.accountId);
+    const cdk = db.cdks.find(c => String(c.code || '').toUpperCase() === String(session.cdk || '').toUpperCase());
+    session.status = 'timeout';
+    session.updatedAt = nowIso();
+    if (cdk && cdk.status === 'reserved' && cdk.reservedSessionId === session.id) {
+      cdk.status = 'active';
+      cdk.reservedSessionId = null;
+      cdk.reservedAt = null;
+    }
+    if (account) {
+      if (Number(account.useCount || 0) === 0 && !session.reused) {
+        account.status = 'failed';
+      } else if (session.reused || Number(account.useCount || 0) > 0) {
+        account.status = 'resend_failed';
+        account.resendCooldownUntil ||= addSecondsIso(config.resendCooldownSeconds || 300);
+      }
+      account.updatedAt = nowIso();
+    }
+    changed = true;
+  }
+  return changed;
+}
+
+function reserveReusableAccountForResend(cdkCode, config) {
+  return transact(wdb => {
+    expireStaleWaitingSessions(wdb, config);
+    const c = wdb.cdks.find(x => x.code.toUpperCase() === cdkCode);
+    if (!c || (c.status || 'active') !== 'active') throw Object.assign(new Error('CDK 不可用'), { status: 400 });
+    const reusable = findReusableAccount(wdb, config, { cdkCode });
+    if (!reusable) return null;
+    const ts = nowIso();
+    reusable.status = 'resending';
+    reusable.resendingAt = ts;
+    reusable.updatedAt = ts;
+    c.status = 'resending';
+    c.reservedAt = ts;
+    c.reservedAccountId = reusable.id;
+    return { ...reusable };
+  });
 }
 
 
@@ -383,12 +468,13 @@ async function refundIfEligible(dbSnapshot, sessionId) {
 async function allocateSession(cdkCode) {
   const db = readDb();
   const config = getRuntimeConfig(db);
+  if (expireStaleWaitingSessions(db, config)) { writeDb(db); return allocateSession(cdkCode); }
   const cdk = db.cdks.find(x => x.code.toUpperCase() === cdkCode);
   if (!cdk) throw Object.assign(new Error('CDK 不可用'), { status: 400 });
   if (!['active'].includes(cdk.status || 'active')) throw Object.assign(new Error('CDK 不可用'), { status: 400 });
   if (!config.mockMode && !config.apiKey) throw Object.assign(new Error('服务暂时不可用，请稍后再试'), { status: 503, publicMessage: true });
 
-  const reusable = findReusableAccount(db, config);
+  const reusable = reserveReusableAccountForResend(cdkCode, config);
   if (reusable) {
     try {
       await resendSms(config, reusable.orderid);
@@ -401,6 +487,13 @@ async function allocateSession(cdkCode) {
           a.resendError = scrubSensitive({ message: e.message, details: e.details || null });
           a.resendCooldownUntil = addSecondsIso(cooldown);
           a.updatedAt = nowIso();
+          delete a.resendingAt;
+        }
+        const c = wdb.cdks.find(x => x.code.toUpperCase() === cdkCode);
+        if (c && c.status === 'resending' && c.reservedAccountId === reusable.id) {
+          c.status = 'active';
+          c.reservedAt = null;
+          delete c.reservedAccountId;
         }
         audit(wdb, null, 'system.resend_failed_cooldown', { accountId: reusable.id, phone: reusable.phone, cooldownSeconds: cooldown, error: e.message, details: e.details || null });
       });
@@ -409,17 +502,19 @@ async function allocateSession(cdkCode) {
     return transact(wdb => {
       const c = wdb.cdks.find(x => x.code.toUpperCase() === cdkCode);
       const a = wdb.accounts.find(x => x.id === reusable.id);
-      if (!c || (c.status || 'active') !== 'active') throw Object.assign(new Error('CDK 不可用'), { status: 400 });
-      if (!a || Number(a.useCount || 0) >= Number(a.maxUses || config.maxAccountUses)) throw Object.assign(new Error('号码刚刚变为不可用，请重试'), { status: 409 });
+      if (!c || c.status !== 'resending' || c.reservedAccountId !== a?.id) throw Object.assign(new Error('CDK 不可用'), { status: 400 });
+      if (!a || a.status !== 'resending') throw Object.assign(new Error('号码刚刚变为不可用，请重试'), { status: 409 });
+      if (Number(a.useCount || 0) >= accountMaxUses(a, config)) throw Object.assign(new Error('号码刚刚变为不可用，请重试'), { status: 409 });
       a.status = 'waiting';
       a.updatedAt = nowIso();
+      delete a.resendingAt;
       const sessionToken = randomToken();
       const session = {
         id: makeId('sess'), sessionTokenHash: hashToken(sessionToken), cdk: c.code, accountId: a.id, orderid: a.orderid, phone: a.phone,
         country: a.country, service: a.service, pool: a.pool || '', status: 'waiting', counted: false,
         reused: true, createdAt: nowIso(), updatedAt: nowIso(), deadlineAt: addSecondsIso(config.timeoutSeconds || 120),
       };
-      c.status = 'reserved'; c.reservedAt = session.createdAt; c.reservedSessionId = session.id;
+      c.status = 'reserved'; c.reservedAt = session.createdAt; c.reservedSessionId = session.id; delete c.reservedAccountId;
       wdb.sessions.unshift(session);
       wdb.logs.unshift({ id: makeId('log'), type: 'reuse', sessionId: session.id, accountId: a.id, createdAt: nowIso() });
       return { session, sessionToken, account: a, reused: true };
@@ -532,7 +627,9 @@ app.post('/api/session/check', requireSameOrigin, async (req, res, next) => {
       transact(wdb => {
         const s = wdb.sessions.find(x => x.id === sessionId);
         const a = wdb.accounts.find(x => x.id === account.id);
+        const c = s ? wdb.cdks.find(x => x.code.toUpperCase() === s.cdk.toUpperCase()) : null;
         if (s) { s.status = 'timeout'; s.updatedAt = nowIso(); }
+        if (c && c.status === 'reserved' && c.reservedSessionId === sessionId) { c.status = 'active'; c.reservedSessionId = null; c.reservedAt = null; }
         if (a && Number(a.useCount || 0) === 0 && !session.reused) { a.status = 'failed'; a.updatedAt = nowIso(); }
         else if (a && session.reused) { a.status = 'resend_failed'; a.resendCooldownUntil = addSecondsIso(wdb.config.resendCooldownSeconds || 300); a.updatedAt = nowIso(); }
         audit(wdb, req, 'user.session_timeout', { sessionId, accountId: account.id, phone: account.phone });
