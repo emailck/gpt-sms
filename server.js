@@ -538,7 +538,7 @@ async function refundIfEligible(dbSnapshot, sessionId) {
     transact(db => {
       const s = db.sessions.find(x => x.id === sessionId);
       const a = db.accounts.find(x => x.id === account.id);
-      const retryAfter = addSecondsIso(db.config.refundRetrySeconds || 300);
+      const retryAfter = addSecondsIso(db.config.refundRetrySeconds || 600);
       const err = scrubSensitive({ message: e.message, details: e.details || null });
       if (s) { s.refundStatus = 'failed'; s.refundError = err; s.updatedAt = nowIso(); }
       if (a && Number(a.useCount || 0) === 0) {
@@ -851,11 +851,11 @@ app.get('/api/admin/overview', requireAdmin, async (req, res) => {
 });
 
 app.post('/api/admin/config', requireSameOrigin, requireAdmin, (req, res) => {
-  const allowed = ['apiKey', 'country', 'service', 'pool', 'maxPrice', 'pricingOption', 'maxAccountUses', 'timeoutSeconds', 'changeNumberAfterSeconds', 'pollIntervalSeconds', 'mockMode', 'mockReceiveAfterChecks', 'purchaseEnabled', 'purchaseUrl', 'purchaseTextZh', 'purchaseTextEn', 'resendCooldownSeconds'];
+  const allowed = ['apiKey', 'country', 'service', 'pool', 'maxPrice', 'pricingOption', 'maxAccountUses', 'timeoutSeconds', 'changeNumberAfterSeconds', 'pollIntervalSeconds', 'mockMode', 'mockReceiveAfterChecks', 'purchaseEnabled', 'purchaseUrl', 'purchaseTextZh', 'purchaseTextEn', 'resendCooldownSeconds', 'refundRetrySeconds'];
   const updated = transact(db => {
     for (const k of allowed) {
       if (req.body[k] !== undefined) {
-        if (['maxAccountUses', 'timeoutSeconds', 'changeNumberAfterSeconds', 'pollIntervalSeconds', 'mockReceiveAfterChecks', 'resendCooldownSeconds'].includes(k)) db.config[k] = Number(req.body[k]);
+        if (['maxAccountUses', 'timeoutSeconds', 'changeNumberAfterSeconds', 'pollIntervalSeconds', 'mockReceiveAfterChecks', 'resendCooldownSeconds', 'refundRetrySeconds'].includes(k)) db.config[k] = Number(req.body[k]);
         else if (k === 'mockMode' || k === 'purchaseEnabled') db.config[k] = req.body[k] === true || req.body[k] === 'true' || req.body[k] === '1' || req.body[k] === 'on';
         else if (k === 'apiKey' && String(req.body[k]) === '********') continue;
         else if (k === 'apiKey') db.config[k] = storeApiKey(String(req.body[k] ?? ''));
@@ -899,6 +899,38 @@ app.post('/api/admin/cdk/:code/disable', requireSameOrigin, requireAdmin, (req, 
   });
   if (!cdk) return res.status(404).json({ success: 0, message: 'CDK 不存在' });
   res.json({ success: 1, cdk });
+});
+
+app.post('/api/admin/cdks/redeem', requireSameOrigin, requireAdmin, (req, res) => {
+  const input = Array.isArray(req.body.codes) ? req.body.codes.join('\n') : String(req.body.codes || req.body.code || '');
+  const codes = [...new Set(input.split(/[\s,，;；]+/).map(x => x.trim().toUpperCase()).filter(Boolean))];
+  if (!codes.length) return res.status(400).json({ success: 0, message: '请输入 CDK' });
+  const result = transact(db => {
+    const rows = [];
+    let redeemed = 0;
+    let missing = 0;
+    let skipped = 0;
+    for (const code of codes) {
+      const row = db.cdks.find(x => x.code.toUpperCase() === code);
+      if (!row) { missing++; rows.push({ code, status: 'missing' }); continue; }
+      if (['used', 'redeemed', 'disabled'].includes(String(row.status || 'active'))) {
+        skipped++;
+        rows.push(publicCdk(row, { admin: true }));
+        continue;
+      }
+      row.status = 'redeemed';
+      row.redeemedAt = nowIso();
+      row.redeemedReason = 'admin_manual';
+      row.reservedSessionId = null;
+      row.reservedAt = null;
+      redeemed++;
+      rows.push(publicCdk(row, { admin: true }));
+    }
+    db.logs.unshift({ id: makeId('log'), type: 'cdk_redeem_admin', count: redeemed, createdAt: nowIso() });
+    audit(db, req, 'admin.cdk_redeem', { requested: codes.length, redeemed, skipped, missing });
+    return { requested: codes.length, redeemed, skipped, missing, rows };
+  });
+  res.json({ success: 1, ...result });
 });
 
 app.get('/api/catalog/countries', requireAdmin, async (req, res, next) => { try { res.json({ success: 1, data: await listCountries(getRuntimeConfig(readDb())) }); } catch (e) { next(e); } });

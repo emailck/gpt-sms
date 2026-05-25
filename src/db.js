@@ -26,6 +26,7 @@ export const DEFAULT_CONFIG = {
   purchaseTextZh: process.env.PURCHASE_TEXT_ZH || '购买',
   purchaseTextEn: process.env.PURCHASE_TEXT_EN || 'Buy',
   resendCooldownSeconds: Number(process.env.RESEND_COOLDOWN_SECONDS || 300),
+  refundRetrySeconds: Number(process.env.REFUND_RETRY_SECONDS || 600),
 };
 
 const DEFAULT_DB = {
@@ -44,6 +45,7 @@ function normalizeDb(db) {
   if (process.env.MOCK_RECEIVE_AFTER_CHECKS) db.config.mockReceiveAfterChecks = Number(process.env.MOCK_RECEIVE_AFTER_CHECKS);
   if (process.env.TIMEOUT_SECONDS) db.config.timeoutSeconds = Number(process.env.TIMEOUT_SECONDS);
   if (process.env.CHANGE_NUMBER_AFTER_SECONDS) db.config.changeNumberAfterSeconds = Number(process.env.CHANGE_NUMBER_AFTER_SECONDS);
+  if (process.env.REFUND_RETRY_SECONDS) db.config.refundRetrySeconds = Number(process.env.REFUND_RETRY_SECONDS);
   db.cdks ||= [];
   db.accounts ||= [];
   db.sessions ||= [];
