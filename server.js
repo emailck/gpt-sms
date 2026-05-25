@@ -41,7 +41,56 @@ app.use('/api/admin', rateLimit({ windowMs: 60_000, limit: 60, standardHeaders: 
 app.use(express.static(path.resolve('public'), { dotfiles: 'deny', index: 'index.html', extensions: ['html'] }));
 app.use('/api', (req, res, next) => { res.set('Cache-Control', 'no-store'); next(); });
 
+const COUNTRY_CACHE_PATH = path.resolve(process.env.COUNTRY_CACHE_PATH || './data/catalog-countries.json');
+const COUNTRY_CACHE_TTL_MS = Number(process.env.COUNTRY_CACHE_TTL_SECONDS || 24 * 60 * 60) * 1000;
 
+function normalizeCountries(raw) {
+  const arr = Array.isArray(raw) ? raw : (Array.isArray(raw?.data) ? raw.data : []);
+  return arr.map(x => ({
+    id: x.ID ?? x.id ?? x.country_id ?? '',
+    name: String(x.name ?? x.country ?? '').trim(),
+    shortName: String(x.short_name ?? x.shortName ?? x.iso ?? '').trim(),
+    cc: String(x.cc ?? x.phone_code ?? '').trim(),
+    region: String(x.region ?? '').trim(),
+  })).filter(x => x.id !== '' && x.name);
+}
+
+function readCountryCache() {
+  try {
+    if (!fs.existsSync(COUNTRY_CACHE_PATH)) return null;
+    const cache = JSON.parse(fs.readFileSync(COUNTRY_CACHE_PATH, 'utf8'));
+    if (!Array.isArray(cache.data)) return null;
+    return cache;
+  } catch { return null; }
+}
+
+function writeCountryCache(data) {
+  fs.mkdirSync(path.dirname(COUNTRY_CACHE_PATH), { recursive: true });
+  const tmp = `${COUNTRY_CACHE_PATH}.${process.pid}.tmp`;
+  fs.writeFileSync(tmp, JSON.stringify({ updatedAt: nowIso(), data }, null, 2));
+  fs.renameSync(tmp, COUNTRY_CACHE_PATH);
+}
+
+async function getCachedCountries(config, { force = false } = {}) {
+  const cache = readCountryCache();
+  const fresh = cache?.updatedAt && (Date.now() - Date.parse(cache.updatedAt) < COUNTRY_CACHE_TTL_MS);
+  if (!force && cache?.data?.length && fresh) return { data: cache.data, cached: true, updatedAt: cache.updatedAt };
+  try {
+    const data = normalizeCountries(await listCountries(config));
+    if (data.length) {
+      const updatedAt = nowIso();
+      fs.mkdirSync(path.dirname(COUNTRY_CACHE_PATH), { recursive: true });
+      const tmp = `${COUNTRY_CACHE_PATH}.${process.pid}.tmp`;
+      fs.writeFileSync(tmp, JSON.stringify({ updatedAt, data }, null, 2));
+      fs.renameSync(tmp, COUNTRY_CACHE_PATH);
+      return { data, cached: false, updatedAt };
+    }
+    throw new Error('上游国家列表为空');
+  } catch (e) {
+    if (cache?.data?.length) return { data: cache.data, cached: true, stale: true, updatedAt: cache.updatedAt, warning: e.message };
+    throw e;
+  }
+}
 
 function hashApiKey(key) {
   return createHash('sha256').update(String(key || '')).digest('hex');
@@ -1127,6 +1176,8 @@ app.get('/api/admin/overview', requireAdmin, async (req, res) => {
     cdks: db.cdks.map(c => publicCdk(c, { admin: true })),
     accounts: db.accounts.map(a => publicAccount(a, { admin: true })),
     sessions: db.sessions.map(s => publicSession(s, db.accounts.find(a => a.id === s.accountId), { admin: true })),
+    clients: (db.clients || []).map(c => publicClient(c)),
+    billingLogs: scrubSensitive((db.billingLogs || []).slice(0, 300)),
     logs: scrubSensitive(db.logs.slice(0, 100)),
     auditLogs: scrubSensitive((db.auditLogs || []).slice(0, 300)),
   });
@@ -1290,7 +1341,7 @@ app.post('/api/admin/cdks/redeem', requireSameOrigin, requireAdmin, (req, res) =
   res.json({ success: 1, ...result });
 });
 
-app.get('/api/catalog/countries', requireAdmin, async (req, res, next) => { try { res.json({ success: 1, data: await listCountries(getRuntimeConfig(readDb())) }); } catch (e) { next(e); } });
+app.get('/api/catalog/countries', requireAdmin, async (req, res, next) => { try { const result = await getCachedCountries(getRuntimeConfig(readDb()), { force: req.query.force === '1' || req.query.refresh === '1' }); res.json({ success: 1, ...result }); } catch (e) { next(e); } });
 app.get('/api/catalog/services', requireAdmin, async (req, res, next) => { try { res.json({ success: 1, data: await listServices(getRuntimeConfig(readDb())) }); } catch (e) { next(e); } });
 app.get('/api/catalog/pools', requireAdmin, async (req, res, next) => { try { res.json({ success: 1, data: await listPools(getRuntimeConfig(readDb())) }); } catch (e) { next(e); } });
 app.post('/api/sms/price', requireAdmin, async (req, res, next) => { try { res.json({ success: 1, data: await getPrice(getRuntimeConfig(readDb()), req.body) }); } catch (e) { transact(db => audit(db, req, 'admin.price_error', { message: e.message, details: e.details || null })); next(e); } });

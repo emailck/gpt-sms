@@ -4,3 +4,5 @@
 @media(max-width:680px){.top .row{position:static}.top>div:first-child{text-align:center;width:100%}}
 
 .cdk-actions{justify-content:center}.cdk-actions input{flex-basis:100%;margin-bottom:4px}.cdk-actions button{min-width:132px}
+
+.input-row{display:flex;gap:8px;align-items:center}.input-row input{flex:1}.input-row .mini{width:auto;padding:12px 14px;white-space:nowrap}.hint{margin-top:6px;color:var(--muted);font-size:12px;line-height:1.35}
