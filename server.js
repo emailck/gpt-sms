@@ -1,7 +1,7 @@
 import express from 'express';
 import path from 'node:path';
 import fs from 'node:fs';
-import { createHash, createHmac, timingSafeEqual } from 'node:crypto';
+import { createHash, createHmac, timingSafeEqual, randomBytes } from 'node:crypto';
 import helmet from 'helmet';
 import rateLimit from 'express-rate-limit';
 import cookieParser from 'cookie-parser';
@@ -35,11 +35,128 @@ app.use(express.urlencoded({ extended: true, limit: '64kb' }));
 app.use(cookieParser());
 app.use('/api/cdk', rateLimit({ windowMs: 60_000, limit: 10, standardHeaders: true, legacyHeaders: false }));
 app.use('/api/session', rateLimit({ windowMs: 60_000, limit: 90, standardHeaders: true, legacyHeaders: false }));
+app.use('/api/v1', rateLimit({ windowMs: 60_000, limit: 120, standardHeaders: true, legacyHeaders: false }));
 app.use('/api/admin/login', rateLimit({ windowMs: 15 * 60_000, limit: 8, standardHeaders: true, legacyHeaders: false }));
 app.use('/api/admin', rateLimit({ windowMs: 60_000, limit: 60, standardHeaders: true, legacyHeaders: false }));
 app.use(express.static(path.resolve('public'), { dotfiles: 'deny', index: 'index.html', extensions: ['html'] }));
 app.use('/api', (req, res, next) => { res.set('Cache-Control', 'no-store'); next(); });
 
+
+
+function hashApiKey(key) {
+  return createHash('sha256').update(String(key || '')).digest('hex');
+}
+
+function makeApiKey() {
+  return `gptsms_live_${randomBytes(24).toString('base64url')}`;
+}
+
+function publicClient(client, { revealKey = false } = {}) {
+  return {
+    id: client.id,
+    name: client.name || '',
+    apiKeyPrefix: client.apiKeyPrefix || '',
+    apiKey: revealKey ? client.apiKey : undefined,
+    status: client.status || 'active',
+    balance: Number(client.balance || 0),
+    pricePerSuccess: Number(client.pricePerSuccess || 1),
+    createdAt: client.createdAt,
+    updatedAt: client.updatedAt,
+  };
+}
+
+function clientFromAuth(req) {
+  const auth = String(req.get('authorization') || '');
+  const m = auth.match(/^Bearer\s+(.+)$/i);
+  const key = m ? m[1].trim() : '';
+  if (!key) return null;
+  const keyHash = hashApiKey(key);
+  const db = readDb();
+  const client = (db.clients || []).find(c => c.apiKeyHash === keyHash);
+  return client ? { db, client } : null;
+}
+
+function requireApiClient(req, res, next) {
+  const found = clientFromAuth(req);
+  if (!found) return res.status(401).json({ success: 0, code: 'INVALID_AUTH', message: '认证失败' });
+  if ((found.client.status || 'active') !== 'active') return res.status(403).json({ success: 0, code: 'CLIENT_DISABLED', message: '客户已禁用' });
+  req.apiClient = found.client;
+  next();
+}
+
+function ensureClientBalance(client) {
+  if (Number(client.balance || 0) < Number(client.pricePerSuccess || 1)) {
+    const err = new Error('余额不足');
+    err.status = 402;
+    err.code = 'INSUFFICIENT_BALANCE';
+    err.publicMessage = true;
+    throw err;
+  }
+}
+
+function apiSessionPayload(session, account, client = null) {
+  const cfg = readDb().config;
+  const payload = frontendSessionPayload(session, account, cfg);
+  const msg = session?.message?.text || '';
+  const code = msg.match(/\b\d{4,8}\b/)?.[0] || '';
+  return {
+    sessionId: session.id,
+    sessionToken: undefined,
+    phone: account?.phone || session.phone || '',
+    status: payload.session.status,
+    received: payload.session.status === 'received' || !!session.counted,
+    reused: !!session.reused,
+    expiresAt: payload.session.deadlineAt,
+    canChangeAt: payload.session.canChangeAt,
+    canChange: payload.session.canChange,
+    externalId: session.externalId || '',
+    message: msg || undefined,
+    code: code || undefined,
+    receivedAt: session.receivedAt || session.message?.receivedAt || undefined,
+    billing: client ? billingPayload(client, session) : undefined,
+  };
+}
+
+function billingPayload(client, session) {
+  return {
+    charged: false,
+    alreadyCharged: !!session.billed,
+    amount: Number(session.billAmount || client.pricePerSuccess || 1),
+    balance: Number(client.balance || 0),
+    billingId: session.billingId || null,
+  };
+}
+
+function chargeClientForSession(db, session, account) {
+  if (!session.clientId || session.billed) return null;
+  const client = (db.clients || []).find(c => c.id === session.clientId);
+  if (!client || (client.status || 'active') !== 'active') return null;
+  const amount = Number(client.pricePerSuccess || 1);
+  const before = Number(client.balance || 0);
+  if (before < amount) {
+    session.billingError = 'INSUFFICIENT_BALANCE';
+    return null;
+  }
+  const bill = {
+    id: makeId('bill'),
+    clientId: client.id,
+    sessionId: session.id,
+    externalId: session.externalId || '',
+    phone: account?.phone || session.phone || '',
+    type: 'sms_success',
+    amount: -amount,
+    balanceBefore: before,
+    balanceAfter: before - amount,
+    createdAt: nowIso(),
+  };
+  client.balance = before - amount;
+  client.updatedAt = bill.createdAt;
+  session.billed = true;
+  session.billingId = bill.id;
+  session.billAmount = amount;
+  db.billingLogs.unshift(bill);
+  return { bill, client };
+}
 
 function randomToken() {
   return makeId('tok');
@@ -167,7 +284,7 @@ function publicAccount(account, { admin = false, revealPhone = false } = {}) {
 function publicSession(session, account, { admin = false, revealPhone = false } = {}) {
   return {
     id: session.id,
-    cdk: admin ? session.cdk : maskCdk(session.cdk),
+    cdk: admin ? (session.clientId ? '' : session.cdk) : maskCdk(session.cdk),
     accountId: admin ? session.accountId : undefined,
     orderid: admin ? (account?.orderid || session.orderid || '') : undefined,
     phone: admin || revealPhone ? (account?.phone || session.phone || '') : maskPhone(account?.phone || session.phone || ''),
@@ -186,6 +303,10 @@ function publicSession(session, account, { admin = false, revealPhone = false } 
     updatedAt: session.updatedAt,
     reused: admin ? !!session.reused : undefined,
     refundStatus: admin ? (session.refundStatus || null) : undefined,
+    clientId: admin ? (session.clientId || null) : undefined,
+    externalId: admin ? (session.externalId || '') : undefined,
+    billed: admin ? !!session.billed : undefined,
+    billingId: admin ? (session.billingId || null) : undefined,
   };
 }
 
@@ -382,10 +503,10 @@ function expireStaleWaitingSessions(db, config) {
   return changed;
 }
 
-function reserveReusableAccountForResend(cdkCode, config) {
+function reserveReusableAccountForResend(cdkCode, config, opts = {}) {
   return transact(wdb => {
     expireStaleWaitingSessions(wdb, config);
-    const c = wdb.cdks.find(x => x.code.toUpperCase() === cdkCode);
+    const c = opts.virtualCdk || wdb.cdks.find(x => x.code.toUpperCase() === cdkCode);
     if (!c || (c.status || 'active') !== 'active') throw Object.assign(new Error('CDK 不可用'), { status: 400 });
     const reusable = findReusableAccount(wdb, config, { cdkCode });
     if (!reusable) return null;
@@ -393,9 +514,11 @@ function reserveReusableAccountForResend(cdkCode, config) {
     reusable.status = 'resending';
     reusable.resendingAt = ts;
     reusable.updatedAt = ts;
-    c.status = 'resending';
-    c.reservedAt = ts;
-    c.reservedAccountId = reusable.id;
+    if (!opts.virtualCdk) {
+      c.status = 'resending';
+      c.reservedAt = ts;
+      c.reservedAccountId = reusable.id;
+    }
     return { ...reusable };
   });
 }
@@ -554,16 +677,17 @@ async function refundIfEligible(dbSnapshot, sessionId) {
   }
 }
 
-async function allocateSession(cdkCode) {
+async function allocateSession(cdkCode, opts = {}) {
   const db = readDb();
   const config = getRuntimeConfig(db);
-  if (expireStaleWaitingSessions(db, config)) { writeDb(db); return allocateSession(cdkCode); }
-  const cdk = db.cdks.find(x => x.code.toUpperCase() === cdkCode);
+  if (expireStaleWaitingSessions(db, config)) { writeDb(db); return allocateSession(cdkCode, opts); }
+  const virtualCdk = opts.virtualCdk || null;
+  const cdk = virtualCdk || db.cdks.find(x => x.code.toUpperCase() === cdkCode);
   if (!cdk) throw Object.assign(new Error('CDK 不可用'), { status: 400 });
   if (!['active'].includes(cdk.status || 'active')) throw Object.assign(new Error('CDK 不可用'), { status: 400 });
   if (!config.mockMode && !config.apiKey) throw Object.assign(new Error('服务暂时不可用，请稍后再试'), { status: 503, publicMessage: true });
 
-  const reusable = reserveReusableAccountForResend(cdkCode, config);
+  const reusable = opts.skipReusable ? null : reserveReusableAccountForResend(cdkCode, config, opts);
   if (reusable) {
     try {
       await resendSms(config, reusable.orderid);
@@ -589,9 +713,9 @@ async function allocateSession(cdkCode) {
       return allocateSession(cdkCode);
     }
     return transact(wdb => {
-      const c = wdb.cdks.find(x => x.code.toUpperCase() === cdkCode);
+      const c = opts.virtualCdk || wdb.cdks.find(x => x.code.toUpperCase() === cdkCode);
       const a = wdb.accounts.find(x => x.id === reusable.id);
-      if (!c || c.status !== 'resending' || c.reservedAccountId !== a?.id) throw Object.assign(new Error('CDK 不可用'), { status: 400 });
+      if (!opts.virtualCdk && (!c || c.status !== 'resending' || c.reservedAccountId !== a?.id)) throw Object.assign(new Error('CDK 不可用'), { status: 400 });
       if (!a || a.status !== 'resending') throw Object.assign(new Error('号码刚刚变为不可用，请重试'), { status: 409 });
       if (Number(a.useCount || 0) >= accountMaxUses(a, config)) throw Object.assign(new Error('号码刚刚变为不可用，请重试'), { status: 409 });
       a.status = 'waiting';
@@ -601,9 +725,9 @@ async function allocateSession(cdkCode) {
       const session = {
         id: makeId('sess'), sessionTokenHash: hashToken(sessionToken), cdk: c.code, accountId: a.id, orderid: a.orderid, phone: a.phone,
         country: a.country, service: a.service, pool: a.pool || '', status: 'waiting', counted: false,
-        reused: true, createdAt: nowIso(), updatedAt: nowIso(), deadlineAt: addSecondsIso(config.timeoutSeconds || 120),
+        reused: true, clientId: opts.clientId || null, externalId: opts.externalId || '', billed: false, createdAt: nowIso(), updatedAt: nowIso(), deadlineAt: addSecondsIso(config.timeoutSeconds || 120),
       };
-      c.status = 'reserved'; c.reservedAt = session.createdAt; c.reservedSessionId = session.id; delete c.reservedAccountId;
+      if (!opts.virtualCdk) { c.status = 'reserved'; c.reservedAt = session.createdAt; c.reservedSessionId = session.id; delete c.reservedAccountId; }
       wdb.sessions.unshift(session);
       wdb.logs.unshift({ id: makeId('log'), type: 'reuse', sessionId: session.id, accountId: a.id, createdAt: nowIso() });
       return { session, sessionToken, account: a, reused: true };
@@ -623,7 +747,7 @@ async function allocateSession(cdkCode) {
   }
 
   return transact(wdb => {
-    const c = wdb.cdks.find(x => x.code.toUpperCase() === cdkCode);
+    const c = opts.virtualCdk || wdb.cdks.find(x => x.code.toUpperCase() === cdkCode);
     if (!c || (c.status || 'active') !== 'active') throw Object.assign(new Error('CDK 不可用'), { status: 400 });
     const account = {
       id: makeId('acct'), orderid, phone, country: String(config.country), service: String(config.service), pool: String(poolUsed || config.pool || ''),
@@ -634,9 +758,9 @@ async function allocateSession(cdkCode) {
     const session = {
       id: makeId('sess'), sessionTokenHash: hashToken(sessionToken), cdk: c.code, accountId: account.id, orderid, phone,
       country: account.country, service: account.service, pool: account.pool, status: 'waiting', counted: false,
-      reused: false, createdAt: nowIso(), updatedAt: nowIso(), deadlineAt: addSecondsIso(config.timeoutSeconds || 120),
+      reused: false, clientId: opts.clientId || null, externalId: opts.externalId || '', billed: false, createdAt: nowIso(), updatedAt: nowIso(), deadlineAt: addSecondsIso(config.timeoutSeconds || 120),
     };
-    c.status = 'reserved'; c.reservedAt = session.createdAt; c.reservedSessionId = session.id;
+    if (!opts.virtualCdk) { c.status = 'reserved'; c.reservedAt = session.createdAt; c.reservedSessionId = session.id; }
     wdb.accounts.unshift(account);
     wdb.sessions.unshift(session);
     wdb.logs.unshift({ id: makeId('log'), type: 'purchase', sessionId: session.id, accountId: account.id, poolUsed, triedPools: purchaseResult.triedPools, upstream, createdAt: nowIso() });
@@ -653,6 +777,155 @@ app.get(ADMIN_PATH, (req, res) => {
 app.get(`${ADMIN_PATH}/`, (req, res) => res.redirect(302, ADMIN_PATH));
 app.get(`${ADMIN_PATH}/admin.js`, (req, res) => res.type('application/javascript').sendFile(path.resolve('private/admin.js')));
 
+
+
+function apiNumberResponse(allocated) {
+  return {
+    success: 1,
+    ...apiSessionPayload(allocated.session, allocated.account, readDb().clients.find(c => c.id === allocated.session.clientId)),
+    sessionToken: allocated.sessionToken,
+    pollIntervalSeconds: readDb().config.pollIntervalSeconds,
+  };
+}
+
+app.get('/api/v1/balance', requireApiClient, (req, res) => {
+  const db = readDb();
+  const client = db.clients.find(c => c.id === req.apiClient.id);
+  res.json({ success: 1, balance: Number(client.balance || 0), pricePerSuccess: Number(client.pricePerSuccess || 1), status: client.status || 'active' });
+});
+
+app.post('/api/v1/number', requireApiClient, async (req, res, next) => {
+  try {
+    const db = readDb();
+    const client = db.clients.find(c => c.id === req.apiClient.id);
+    ensureClientBalance(client);
+    const externalId = String(req.body?.externalId || '').trim().slice(0, 120);
+    if (externalId) {
+      const existing = db.sessions.find(s => s.clientId === client.id && s.externalId === externalId && ['waiting', 'received'].includes(String(s.status || '')));
+      if (existing) {
+        const account = db.accounts.find(a => a.id === existing.accountId);
+        return res.json({ success: 1, ...apiSessionPayload(existing, account, client), sessionToken: null, idempotent: true, pollIntervalSeconds: db.config.pollIntervalSeconds });
+      }
+    }
+    const virtualCdk = { code: `API-${client.id}-${makeId('req')}`, status: 'active' };
+    const allocated = await allocateSession(virtualCdk.code, { virtualCdk, clientId: client.id, externalId });
+    transact(wdb => audit(wdb, req, 'api.number_allocated', { clientId: client.id, sessionId: allocated.session.id, accountId: allocated.account.id, externalId, reused: allocated.reused }));
+    res.json(apiNumberResponse(allocated));
+  } catch (e) { next(e); }
+});
+
+app.post('/api/v1/session/check', requireApiClient, async (req, res, next) => {
+  try {
+    requireFields(req.body, ['sessionId', 'sessionToken']);
+    const sessionId = String(req.body.sessionId);
+    const token = String(req.body.sessionToken);
+    const db = readDb();
+    const session = db.sessions.find(s => s.id === sessionId && s.clientId === req.apiClient.id);
+    if (!session) return res.status(404).json({ success: 0, code: 'SESSION_NOT_FOUND', message: '会话不存在' });
+    if (!session.sessionTokenHash || hashToken(token) !== session.sessionTokenHash) return res.status(403).json({ success: 0, code: 'SESSION_FORBIDDEN', message: '无权访问该会话' });
+    const account = db.accounts.find(a => a.id === session.accountId);
+    if (!account) return res.status(404).json({ success: 0, code: 'NUMBER_NOT_FOUND', message: '号码不存在' });
+
+    if (session.status === 'received' || session.counted) {
+      const client = readDb().clients.find(c => c.id === req.apiClient.id);
+      return res.json({ success: 1, ...apiSessionPayload(session, account, client) });
+    }
+
+    const timedOut = Date.now() > new Date(session.deadlineAt).getTime();
+    if (timedOut && session.status === 'waiting') {
+      transact(wdb => {
+        const s = wdb.sessions.find(x => x.id === sessionId);
+        const a = wdb.accounts.find(x => x.id === account.id);
+        if (s) { s.status = 'timeout'; s.updatedAt = nowIso(); }
+        if (a && Number(a.useCount || 0) === 0 && !session.reused) { a.status = 'failed'; a.updatedAt = nowIso(); }
+        else if (a && session.reused) { a.status = 'resend_failed'; a.resendCooldownUntil = addSecondsIso(wdb.config.resendCooldownSeconds || 300); a.updatedAt = nowIso(); }
+        audit(wdb, req, 'api.session_timeout', { clientId: req.apiClient.id, sessionId, accountId: account.id, phone: account.phone });
+      });
+      refundIfEligible(readDb(), sessionId).catch(() => {});
+      const fresh = readDb();
+      const s = fresh.sessions.find(x => x.id === sessionId);
+      const a = fresh.accounts.find(x => x.id === account.id);
+      const c = fresh.clients.find(x => x.id === req.apiClient.id);
+      return res.json({ success: 1, timedOut: true, ...apiSessionPayload(s, a, c) });
+    }
+
+    let data;
+    try {
+      data = await checkSms(getRuntimeConfig(db), account.orderid);
+    } catch (e) {
+      const fresh = transact(wdb => {
+        const s = wdb.sessions.find(x => x.id === sessionId);
+        const a = wdb.accounts.find(x => x.id === account.id);
+        if (s) { s.lastCheckError = scrubSensitive({ message: e.message, details: e.details || null }); s.updatedAt = nowIso(); }
+        if (a) { a.lastCheckError = scrubSensitive({ message: e.message, details: e.details || null }); a.updatedAt = nowIso(); }
+        audit(wdb, req, 'api.sms_check_error', { clientId: req.apiClient.id, sessionId, accountId: account.id, message: e.message, details: e.details || null });
+        return { session: s, account: a, client: wdb.clients.find(c => c.id === req.apiClient.id) };
+      });
+      return res.json({ success: 1, received: false, ...apiSessionPayload(fresh.session, fresh.account, fresh.client) });
+    }
+    const msg = extractMessage(data);
+    const updated = transact(wdb => {
+      const s = wdb.sessions.find(x => x.id === sessionId);
+      const a = wdb.accounts.find(x => x.id === account.id);
+      s.lastCheck = data;
+      s.updatedAt = nowIso();
+      a.lastCheck = data;
+      a.updatedAt = nowIso();
+      if (msg && !s.counted) {
+        s.status = 'received';
+        s.message = msg;
+        s.counted = true;
+        s.receivedAt = msg.receivedAt;
+        a.useCount = Number(a.useCount || 0) + 1;
+        a.lastMessage = msg;
+        a.lastMessageAt = msg.receivedAt;
+        a.status = a.useCount >= Number(a.maxUses || wdb.config.maxAccountUses || 3) ? 'used_up' : 'available';
+        chargeClientForSession(wdb, s, a);
+        wdb.logs.unshift({ id: makeId('log'), type: 'api_received', sessionId: s.id, accountId: a.id, clientId: req.apiClient.id, createdAt: nowIso() });
+        audit(wdb, req, 'api.sms_received', { clientId: req.apiClient.id, sessionId: s.id, accountId: a.id, phone: a.phone });
+      } else if (msg) {
+        s.message = s.message || msg;
+      } else if (isSuccessFlagFalse(data)) {
+        s.status = 'waiting';
+      }
+      return { session: s, account: a, client: wdb.clients.find(c => c.id === req.apiClient.id) };
+    });
+    const payload = apiSessionPayload(updated.session, updated.account, updated.client);
+    if (updated.session.billingId) payload.billing.charged = !!msg && !!updated.session.billed;
+    res.json({ success: 1, timedOut: false, ...payload });
+  } catch (e) { next(e); }
+});
+
+app.post('/api/v1/session/change-number', requireApiClient, async (req, res, next) => {
+  try {
+    requireFields(req.body, ['sessionId', 'sessionToken']);
+    const oldId = String(req.body.sessionId);
+    const token = String(req.body.sessionToken);
+    const snapshot = readDb();
+    const client = snapshot.clients.find(c => c.id === req.apiClient.id);
+    ensureClientBalance(client);
+    const oldSession = snapshot.sessions.find(s => s.id === oldId && s.clientId === client.id);
+    if (!oldSession) return res.status(404).json({ success: 0, code: 'SESSION_NOT_FOUND', message: '会话不存在' });
+    if (!oldSession.sessionTokenHash || hashToken(token) !== oldSession.sessionTokenHash) return res.status(403).json({ success: 0, code: 'SESSION_FORBIDDEN', message: '无权访问该会话' });
+    if (oldSession.status === 'received' || oldSession.counted) return res.status(400).json({ success: 0, code: 'SMS_RECEIVED_CANNOT_CHANGE', message: '已收到短信，不能更换号码' });
+    if (oldSession.status === 'waiting' && !canChangeSession(oldSession, snapshot.config)) return res.status(400).json({ success: 0, code: 'CHANGE_TOO_EARLY', message: '等待满 2 分钟后才能更换号码' });
+    const oldAccount = snapshot.accounts.find(a => a.id === oldSession.accountId);
+    transact(db => {
+      const s = db.sessions.find(x => x.id === oldId);
+      const a = oldAccount ? db.accounts.find(x => x.id === oldAccount.id) : null;
+      if (s) { s.status = 'changed'; s.updatedAt = nowIso(); }
+      if (a && Number(a.useCount || 0) === 0 && !s.reused) { a.status = 'failed'; a.updatedAt = nowIso(); }
+      else if (a && s?.reused) { a.status = 'resend_failed'; a.resendCooldownUntil = addSecondsIso(db.config.resendCooldownSeconds || 300); a.updatedAt = nowIso(); }
+      audit(db, req, 'api.change_number', { clientId: client.id, sessionId: oldId, accountId: oldAccount?.id, phone: oldAccount?.phone });
+    });
+    if (oldAccount && !oldSession.reused && Number(oldAccount.useCount || 0) === 0) {
+      try { await refundIfEligible(snapshot, oldId); } catch {}
+    }
+    const virtualCdk = { code: `API-${client.id}-${makeId('req')}`, status: 'active' };
+    const allocated = await allocateSession(virtualCdk.code, { virtualCdk, clientId: client.id, externalId: oldSession.externalId || '' });
+    res.json(apiNumberResponse(allocated));
+  } catch (e) { next(e); }
+});
 
 app.get('/api/public-config', (req, res) => {
   const cfg = readDb().config;
@@ -716,7 +989,7 @@ app.post('/api/session/check', requireSameOrigin, async (req, res, next) => {
       transact(wdb => {
         const s = wdb.sessions.find(x => x.id === sessionId);
         const a = wdb.accounts.find(x => x.id === account.id);
-        const c = s ? wdb.cdks.find(x => x.code.toUpperCase() === s.cdk.toUpperCase()) : null;
+        const c = s && !s.clientId ? wdb.cdks.find(x => x.code.toUpperCase() === s.cdk.toUpperCase()) : null;
         if (s) { s.status = 'timeout'; s.updatedAt = nowIso(); }
         if (c && c.status === 'reserved' && c.reservedSessionId === sessionId) { c.status = 'active'; c.reservedSessionId = null; c.reservedAt = null; }
         if (a && Number(a.useCount || 0) === 0 && !session.reused) { a.status = 'failed'; a.updatedAt = nowIso(); }
@@ -746,7 +1019,7 @@ app.post('/api/session/check', requireSameOrigin, async (req, res, next) => {
     const updated = transact(wdb => {
       const s = wdb.sessions.find(x => x.id === sessionId);
       const a = wdb.accounts.find(x => x.id === account.id);
-      const c = wdb.cdks.find(x => x.code.toUpperCase() === s.cdk.toUpperCase());
+      const c = s.clientId ? null : wdb.cdks.find(x => x.code.toUpperCase() === s.cdk.toUpperCase());
       s.lastCheck = data;
       s.updatedAt = nowIso();
       a.lastCheck = data;
@@ -761,6 +1034,7 @@ app.post('/api/session/check', requireSameOrigin, async (req, res, next) => {
         a.lastMessageAt = msg.receivedAt;
         a.status = a.useCount >= Number(a.maxUses || wdb.config.maxAccountUses || 3) ? 'used_up' : 'available';
         if (c) { c.status = 'used'; c.usedAt = msg.receivedAt; c.usedSessionId = s.id; c.consumedReason = 'sms_received'; }
+        chargeClientForSession(wdb, s, a);
         wdb.logs.unshift({ id: makeId('log'), type: 'received', sessionId: s.id, accountId: a.id, createdAt: nowIso() });
         audit(wdb, req, 'user.sms_received', { sessionId: s.id, accountId: a.id, cdk: maskCdk(s.cdk), phone: a.phone });
       } else if (msg) {
@@ -795,7 +1069,7 @@ app.post('/api/session/change-number', requireSameOrigin, async (req, res, next)
       const s = db.sessions.find(x => x.id === oldId);
       const a = oldAccount ? db.accounts.find(x => x.id === oldAccount.id) : null;
       if (s) { s.status = 'changed'; s.updatedAt = nowIso(); }
-      const c = db.cdks.find(x => x.code.toUpperCase() === oldSession.cdk.toUpperCase());
+      const c = oldSession.clientId ? null : db.cdks.find(x => x.code.toUpperCase() === oldSession.cdk.toUpperCase());
       if (c && c.status === 'reserved' && c.reservedSessionId === oldId) { c.status = 'active'; c.reservedSessionId = null; c.reservedAt = null; }
       if (a && Number(a.useCount || 0) === 0 && !s.reused) { a.status = 'failed'; a.updatedAt = nowIso(); }
       else if (a && s?.reused) { a.status = 'resend_failed'; a.resendCooldownUntil = addSecondsIso(db.config.resendCooldownSeconds || 300); a.updatedAt = nowIso(); }
@@ -867,6 +1141,65 @@ app.post('/api/admin/config', requireSameOrigin, requireAdmin, (req, res) => {
     return safeConfig(db.config);
   });
   res.json({ success: 1, config: updated });
+});
+
+
+app.post('/api/admin/clients', requireSameOrigin, requireAdmin, (req, res) => {
+  const name = String(req.body.name || '').trim() || 'API Client';
+  const balance = Number(req.body.balance || 0);
+  const pricePerSuccess = Number(req.body.pricePerSuccess || 1);
+  const apiKey = makeApiKey();
+  const client = transact(db => {
+    const row = {
+      id: makeId('client'),
+      name,
+      apiKeyHash: hashApiKey(apiKey),
+      apiKeyPrefix: apiKey.slice(0, 22),
+      status: 'active',
+      balance,
+      pricePerSuccess,
+      createdAt: nowIso(),
+      updatedAt: nowIso(),
+    };
+    db.clients.unshift(row);
+    audit(db, req, 'admin.client_create', { clientId: row.id, name, balance, pricePerSuccess });
+    return publicClient({ ...row, apiKey }, { revealKey: true });
+  });
+  res.json({ success: 1, client });
+});
+
+app.post('/api/admin/client/:id/update', requireSameOrigin, requireAdmin, (req, res) => {
+  const id = String(req.params.id);
+  const updated = transact(db => {
+    const c = db.clients.find(x => x.id === id);
+    if (!c) return null;
+    if (req.body.name !== undefined) c.name = String(req.body.name || '');
+    if (req.body.status !== undefined) c.status = String(req.body.status || 'active');
+    if (req.body.balance !== undefined) c.balance = Number(req.body.balance || 0);
+    if (req.body.pricePerSuccess !== undefined) c.pricePerSuccess = Number(req.body.pricePerSuccess || 1);
+    c.updatedAt = nowIso();
+    audit(db, req, 'admin.client_update', { clientId: id, fields: Object.keys(req.body || {}) });
+    return publicClient(c);
+  });
+  if (!updated) return res.status(404).json({ success: 0, message: '客户不存在' });
+  res.json({ success: 1, client: updated });
+});
+
+app.post('/api/admin/client/:id/recharge', requireSameOrigin, requireAdmin, (req, res) => {
+  const id = String(req.params.id);
+  const amount = Number(req.body.amount || 0);
+  const updated = transact(db => {
+    const c = db.clients.find(x => x.id === id);
+    if (!c) return null;
+    const before = Number(c.balance || 0);
+    c.balance = before + amount;
+    c.updatedAt = nowIso();
+    db.billingLogs.unshift({ id: makeId('bill'), clientId: id, type: 'recharge', amount, balanceBefore: before, balanceAfter: c.balance, createdAt: nowIso() });
+    audit(db, req, 'admin.client_recharge', { clientId: id, amount, balanceBefore: before, balanceAfter: c.balance });
+    return publicClient(c);
+  });
+  if (!updated) return res.status(404).json({ success: 0, message: '客户不存在' });
+  res.json({ success: 1, client: updated });
 });
 
 app.post('/api/admin/cdks', requireSameOrigin, requireAdmin, (req, res) => {

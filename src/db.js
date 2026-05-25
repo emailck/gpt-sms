@@ -36,6 +36,8 @@ const DEFAULT_DB = {
   sessions: [],
   logs: [],
   auditLogs: [],
+  clients: [],
+  billingLogs: [],
   meta: { version: 2, createdAt: new Date().toISOString() },
 };
 
@@ -51,6 +53,8 @@ function normalizeDb(db) {
   db.sessions ||= [];
   db.logs ||= [];
   db.auditLogs ||= [];
+  db.clients ||= [];
+  db.billingLogs ||= [];
   db.meta ||= { version: 2, createdAt: new Date().toISOString() };
   return db;
 }
