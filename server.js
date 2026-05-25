@@ -1210,6 +1210,22 @@ app.post('/api/admin/client/:id/recharge', requireSameOrigin, requireAdmin, (req
   res.json({ success: 1, client: updated });
 });
 
+app.post('/api/admin/client/:id/reset-key', requireSameOrigin, requireAdmin, (req, res) => {
+  const id = String(req.params.id);
+  const apiKey = makeApiKey();
+  const updated = transact(db => {
+    const c = db.clients.find(x => x.id === id);
+    if (!c) return null;
+    c.apiKeyHash = hashApiKey(apiKey);
+    c.apiKeyPrefix = apiKey.slice(0, 22);
+    c.updatedAt = nowIso();
+    audit(db, req, 'admin.client_reset_key', { clientId: id, apiKeyPrefix: c.apiKeyPrefix });
+    return publicClient({ ...c, apiKey }, { revealKey: true });
+  });
+  if (!updated) return res.status(404).json({ success: 0, message: '客户不存在' });
+  res.json({ success: 1, client: updated });
+});
+
 app.post('/api/admin/cdks', requireSameOrigin, requireAdmin, (req, res) => {
   const count = Math.min(Math.max(Number(req.body.count || 1), 1), 1000);
   const note = String(req.body.note || '');

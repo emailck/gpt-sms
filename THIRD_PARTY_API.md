@@ -11,7 +11,7 @@ Authorization: Bearer gptsms_live_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
 Content-Type: application/json
 ```
 
-API Key 只在后台创建客户时显示一次，请妥善保存。
+API Key 只在后台创建客户或重置 Key 时显示一次，请妥善保存。重置后旧 Key 会立即失效。
 
 ## 计费规则
 
