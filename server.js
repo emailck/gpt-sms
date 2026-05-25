@@ -301,7 +301,7 @@ function extractMessage(data) {
 const REUSE_POOL_THRESHOLD = Number(process.env.REUSE_POOL_THRESHOLD || 10);
 const SUCCESSFUL_REUSE_THRESHOLD = Number(process.env.SUCCESSFUL_REUSE_THRESHOLD || 5);
 const BUSY_ACCOUNT_STATUSES = new Set(['waiting', 'resending']);
-const TERMINAL_ACCOUNT_STATUSES = new Set(['failed', 'refunded', 'used_up']);
+const TERMINAL_ACCOUNT_STATUSES = new Set(['failed', 'refund_pending', 'refunded', 'used_up']);
 
 function accountMaxUses(account, config) {
   return Number(account?.maxUses || config.maxAccountUses || 3);
@@ -457,24 +457,101 @@ async function purchaseSmsAuto(config) {
   throw err;
 }
 
+function findExpiredRefundCandidates(db) {
+  return (db.sessions || [])
+    .filter(s => s.status === 'timeout' && !s.counted && !s.reused && s.refundStatus !== 'refunded' && s.refundStatus !== 'pending')
+    .filter(s => {
+      const a = db.accounts.find(x => x.id === s.accountId);
+      return a && a.source === 'new' && Number(a.useCount || 0) === 0 && a.orderid &&
+        a.status !== 'refunded' && a.status !== 'refund_pending' &&
+        a.refundStatus !== 'refunded' && a.refundStatus !== 'pending' &&
+        (!a.refundRetryAfter || Date.now() >= new Date(a.refundRetryAfter).getTime());
+    });
+}
+
+async function refundExpiredUnusedNumbers() {
+  const snapshot = readDb();
+  const candidates = findExpiredRefundCandidates(snapshot);
+  for (const session of candidates) {
+    try {
+      await refundIfEligible(readDb(), session.id);
+    } catch {
+      // refundIfEligible already records the detailed error and retry time.
+    }
+  }
+  return candidates.length;
+}
+
 async function refundIfEligible(dbSnapshot, sessionId) {
   const session = dbSnapshot.sessions.find(s => s.id === sessionId);
   if (!session) return { skipped: true, reason: 'session_not_found' };
   const account = dbSnapshot.accounts.find(a => a.id === session.accountId);
   if (!account) return { skipped: true, reason: 'account_not_found' };
-  if (session.reused || account.source !== 'new' || Number(account.useCount || 0) > 0) {
+  if (session.reused || account.source !== 'new' || Number(account.useCount || 0) > 0 || !account.orderid) {
     return { skipped: true, reason: 'not_eligible' };
   }
-  const result = await cancelSms(getRuntimeConfig(dbSnapshot), account.orderid);
-  transact(db => {
+  if (session.refundStatus === 'refunded' || account.refundStatus === 'refunded' || account.status === 'refunded') {
+    return { skipped: true, reason: 'already_refunded' };
+  }
+  if (session.refundStatus === 'pending' || account.refundStatus === 'pending' || account.status === 'refund_pending') {
+    return { skipped: true, reason: 'refund_pending' };
+  }
+  if (account.refundRetryAfter && Date.now() < new Date(account.refundRetryAfter).getTime()) {
+    return { skipped: true, reason: 'refund_retry_cooldown' };
+  }
+
+  const locked = transact(db => {
     const s = db.sessions.find(x => x.id === sessionId);
     const a = db.accounts.find(x => x.id === account.id);
-    if (s) { s.refundStatus = 'refunded'; s.refundResult = result; s.updatedAt = nowIso(); }
-    if (a && Number(a.useCount || 0) === 0) { a.status = 'refunded'; a.refundResult = result; a.updatedAt = nowIso(); }
-    db.logs.unshift({ id: makeId('log'), type: 'refund', sessionId, accountId: account.id, result, createdAt: nowIso() });
-    audit(db, null, 'system.refund', { sessionId, accountId: account.id, phone: account.phone, result });
+    if (!s || !a) return false;
+    if (s.refundStatus === 'pending' || a.refundStatus === 'pending' || a.status === 'refund_pending') return false;
+    if (s.refundStatus === 'refunded' || a.refundStatus === 'refunded' || a.status === 'refunded') return false;
+    if (s.reused || a.source !== 'new' || Number(a.useCount || 0) > 0) return false;
+    s.refundStatus = 'pending';
+    s.updatedAt = nowIso();
+    a.refundStatus = 'pending';
+    a.status = 'refund_pending';
+    a.updatedAt = nowIso();
+    audit(db, null, 'system.refund_pending', { sessionId, accountId: a.id, phone: a.phone });
+    return true;
   });
-  return result;
+  if (!locked) return { skipped: true, reason: 'lock_failed' };
+
+  try {
+    const result = await cancelSms(getRuntimeConfig(dbSnapshot), account.orderid);
+    transact(db => {
+      const s = db.sessions.find(x => x.id === sessionId);
+      const a = db.accounts.find(x => x.id === account.id);
+      if (s) { s.refundStatus = 'refunded'; s.refundResult = result; s.updatedAt = nowIso(); }
+      if (a && Number(a.useCount || 0) === 0) {
+        a.status = 'refunded';
+        a.refundStatus = 'refunded';
+        a.refundResult = result;
+        a.updatedAt = nowIso();
+        delete a.refundRetryAfter;
+      }
+      db.logs.unshift({ id: makeId('log'), type: 'refund', sessionId, accountId: account.id, result, createdAt: nowIso() });
+      audit(db, null, 'system.refund', { sessionId, accountId: account.id, phone: account.phone, result });
+    });
+    return result;
+  } catch (e) {
+    transact(db => {
+      const s = db.sessions.find(x => x.id === sessionId);
+      const a = db.accounts.find(x => x.id === account.id);
+      const retryAfter = addSecondsIso(db.config.refundRetrySeconds || 300);
+      const err = scrubSensitive({ message: e.message, details: e.details || null });
+      if (s) { s.refundStatus = 'failed'; s.refundError = err; s.updatedAt = nowIso(); }
+      if (a && Number(a.useCount || 0) === 0) {
+        a.status = 'failed';
+        a.refundStatus = 'failed';
+        a.refundError = err;
+        a.refundRetryAfter = retryAfter;
+        a.updatedAt = nowIso();
+      }
+      audit(db, null, 'system.refund_error', { sessionId, accountId: account.id, phone: account.phone, retryAfter, message: e.message, details: e.details || null });
+    });
+    throw e;
+  }
 }
 
 async function allocateSession(cdkCode) {
@@ -646,6 +723,7 @@ app.post('/api/session/check', requireSameOrigin, async (req, res, next) => {
         else if (a && session.reused) { a.status = 'resend_failed'; a.resendCooldownUntil = addSecondsIso(wdb.config.resendCooldownSeconds || 300); a.updatedAt = nowIso(); }
         audit(wdb, req, 'user.session_timeout', { sessionId, accountId: account.id, phone: account.phone });
       });
+      refundIfEligible(readDb(), sessionId).catch(() => {});
       return res.json({ success: 1, received: false, timedOut: true, ...frontendSessionPayload({ ...session, status: 'timeout' }, account) });
     }
 
@@ -868,7 +946,7 @@ transact(db => {
 });
 
 
-function cleanupExpiredWaitingSessions() {
+async function cleanupExpiredWaitingSessions() {
   try {
     const db = readDb();
     const config = getRuntimeConfig(db);
@@ -876,12 +954,13 @@ function cleanupExpiredWaitingSessions() {
       audit(db, null, 'system.expired_waiting_cleanup');
       writeDb(db);
     }
+    await refundExpiredUnusedNumbers();
   } catch (e) {
     console.error('expired waiting cleanup failed:', e.message);
   }
 }
 cleanupExpiredWaitingSessions();
-setInterval(cleanupExpiredWaitingSessions, Number(process.env.WAITING_CLEANUP_INTERVAL_SECONDS || 30) * 1000).unref?.();
+setInterval(() => { cleanupExpiredWaitingSessions(); }, Number(process.env.WAITING_CLEANUP_INTERVAL_SECONDS || 30) * 1000).unref?.();
 
 app.listen(PORT, HOST, () => {
   console.log(`GPTSMS front site running: http://${HOST}:${PORT}/`);
