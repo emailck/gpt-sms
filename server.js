@@ -581,9 +581,9 @@ function reserveReusableAccountForResend(cdkCode, config, opts = {}) {
 }
 
 
-function isPortOccupiedError(err) {
+function isPoolTemporarilyUnavailableError(err) {
   const txt = JSON.stringify(err?.details || {}) + ' ' + String(err?.message || '');
-  return /PORT_OCCUPIED|available slots are currently occupied|try again in 5 minutes/i.test(txt);
+  return /PORT_OCCUPIED|OUT_OF_STOCK|available slots are currently occupied|couldn't find an available phone number|try again in 5 minutes/i.test(txt);
 }
 
 function retryAfterSecondsFromError(err, fallback = 300) {
@@ -627,13 +627,13 @@ async function purchaseSmsAuto(config) {
       return { upstream, poolUsed: pool, triedPools: candidates };
     } catch (e) {
       errors.push({ pool, message: e.message, details: e.details || null });
-      if (!isPortOccupiedError(e)) throw e;
+      if (!isPoolTemporarilyUnavailableError(e)) throw e;
     }
   }
   const err = new Error('当前号码暂时繁忙，请稍后再试');
   err.status = 503;
   err.publicMessage = true;
-  err.details = { type: 'ALL_POOLS_OCCUPIED', triedPools: candidates, errors };
+  err.details = { type: 'ALL_POOLS_UNAVAILABLE', triedPools: candidates, errors };
   throw err;
 }
 
