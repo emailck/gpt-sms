@@ -16,6 +16,9 @@ async function req(url, opts = {}) { const r = await fetch(url, { credentials: '
 function normalizeCountryValue(value) {
   const raw = String(value || '').trim();
   if (!raw) return '';
+  const aliases = { IND: 'IN', USA: 'US', UK: 'GB', GBR: 'GB', IDN: 'ID' };
+  const aliased = aliases[raw.toUpperCase()];
+  if (aliased) return aliased;
   const lower = raw.toLowerCase();
   const hit = countries.find(c => String(c.shortName || '').toLowerCase() === lower || String(c.id || '').toLowerCase() === lower || String(c.name || '').toLowerCase() === lower || `${c.name} ${c.shortName} ${c.id}`.toLowerCase() === lower);
   return hit ? String(hit.shortName || hit.id) : raw;
