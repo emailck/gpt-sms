@@ -275,6 +275,8 @@ function publicAccount(account, { admin = false, revealPhone = false } = {}) {
     maxUses: admin ? Number(account.maxUses || 3) : undefined,
     status: account.status,
     source: admin ? (account.source || 'new') : undefined,
+    resendCooldownUntil: admin ? (account.resendCooldownUntil || null) : undefined,
+    resendError: admin ? (account.resendError || null) : undefined,
     lastMessageAt: account.lastMessageAt || null,
     createdAt: admin ? account.createdAt : undefined,
     updatedAt: admin ? account.updatedAt : undefined,
@@ -428,6 +430,14 @@ function accountMaxUses(account, config) {
   return Number(account?.maxUses || config.maxAccountUses || 3);
 }
 
+function cooldownReusedAccount(account, config) {
+  if (!account) return;
+  account.status = Number(account.useCount || 0) >= accountMaxUses(account, config) ? 'used_up' : 'available';
+  account.resendCooldownUntil = addSecondsIso(config.resendCooldownSeconds || 300);
+  account.updatedAt = nowIso();
+  delete account.resendError;
+}
+
 function accountMatchesConfig(account, config) {
   const configuredPool = String(config.pool || '').trim();
   const poolMatches = (accountPool) => !configuredPool || configuredPool.toLowerCase() === 'auto' || String(accountPool || '') === configuredPool;
@@ -493,10 +503,8 @@ function expireStaleWaitingSessions(db, config) {
       if (Number(account.useCount || 0) === 0 && !session.reused) {
         account.status = 'failed';
       } else if (session.reused || Number(account.useCount || 0) > 0) {
-        account.status = 'resend_failed';
-        account.resendCooldownUntil ||= addSecondsIso(config.resendCooldownSeconds || 300);
+        cooldownReusedAccount(account, config);
       }
-      account.updatedAt = nowIso();
     }
     changed = true;
   }
@@ -838,7 +846,7 @@ app.post('/api/v1/session/check', requireApiClient, async (req, res, next) => {
         const a = wdb.accounts.find(x => x.id === account.id);
         if (s) { s.status = 'timeout'; s.updatedAt = nowIso(); }
         if (a && Number(a.useCount || 0) === 0 && !session.reused) { a.status = 'failed'; a.updatedAt = nowIso(); }
-        else if (a && session.reused) { a.status = 'resend_failed'; a.resendCooldownUntil = addSecondsIso(wdb.config.resendCooldownSeconds || 300); a.updatedAt = nowIso(); }
+        else if (a && session.reused) { cooldownReusedAccount(a, wdb.config); }
         audit(wdb, req, 'api.session_timeout', { clientId: req.apiClient.id, sessionId, accountId: account.id, phone: account.phone });
       });
       refundIfEligible(readDb(), sessionId).catch(() => {});
@@ -915,7 +923,7 @@ app.post('/api/v1/session/change-number', requireApiClient, async (req, res, nex
       const a = oldAccount ? db.accounts.find(x => x.id === oldAccount.id) : null;
       if (s) { s.status = 'changed'; s.updatedAt = nowIso(); }
       if (a && Number(a.useCount || 0) === 0 && !s.reused) { a.status = 'failed'; a.updatedAt = nowIso(); }
-      else if (a && s?.reused) { a.status = 'resend_failed'; a.resendCooldownUntil = addSecondsIso(db.config.resendCooldownSeconds || 300); a.updatedAt = nowIso(); }
+      else if (a && s?.reused) { cooldownReusedAccount(a, db.config); }
       audit(db, req, 'api.change_number', { clientId: client.id, sessionId: oldId, accountId: oldAccount?.id, phone: oldAccount?.phone });
     });
     if (oldAccount && !oldSession.reused && Number(oldAccount.useCount || 0) === 0) {
@@ -993,7 +1001,7 @@ app.post('/api/session/check', requireSameOrigin, async (req, res, next) => {
         if (s) { s.status = 'timeout'; s.updatedAt = nowIso(); }
         if (c && c.status === 'reserved' && c.reservedSessionId === sessionId) { c.status = 'active'; c.reservedSessionId = null; c.reservedAt = null; }
         if (a && Number(a.useCount || 0) === 0 && !session.reused) { a.status = 'failed'; a.updatedAt = nowIso(); }
-        else if (a && session.reused) { a.status = 'resend_failed'; a.resendCooldownUntil = addSecondsIso(wdb.config.resendCooldownSeconds || 300); a.updatedAt = nowIso(); }
+        else if (a && session.reused) { cooldownReusedAccount(a, wdb.config); }
         audit(wdb, req, 'user.session_timeout', { sessionId, accountId: account.id, phone: account.phone });
       });
       refundIfEligible(readDb(), sessionId).catch(() => {});
@@ -1072,7 +1080,7 @@ app.post('/api/session/change-number', requireSameOrigin, async (req, res, next)
       const c = oldSession.clientId ? null : db.cdks.find(x => x.code.toUpperCase() === oldSession.cdk.toUpperCase());
       if (c && c.status === 'reserved' && c.reservedSessionId === oldId) { c.status = 'active'; c.reservedSessionId = null; c.reservedAt = null; }
       if (a && Number(a.useCount || 0) === 0 && !s.reused) { a.status = 'failed'; a.updatedAt = nowIso(); }
-      else if (a && s?.reused) { a.status = 'resend_failed'; a.resendCooldownUntil = addSecondsIso(db.config.resendCooldownSeconds || 300); a.updatedAt = nowIso(); }
+      else if (a && s?.reused) { cooldownReusedAccount(a, db.config); }
       db.logs.unshift({ id: makeId('log'), type: 'change_number', sessionId: oldId, accountId: oldAccount?.id, createdAt: nowIso() });
       audit(db, req, 'user.change_number', { sessionId: oldId, accountId: oldAccount?.id, phone: oldAccount?.phone });
     });
