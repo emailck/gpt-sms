@@ -1153,7 +1153,7 @@ app.get('/api/session/:id', (req, res) => {
 });
 
 app.post('/api/admin/login', requireSameOrigin, (req, res) => {
-  if (!safeEqual(req.body?.adminToken, ADMIN_TOKEN)) { transact(db => audit(db, req, 'admin.login_failed')); return res.status(401).json({ success: 0, message: '认证失败' }); }
+  if (!safeEqual(String(req.body?.adminToken || '').trim(), ADMIN_TOKEN)) { transact(db => audit(db, req, 'admin.login_failed')); return res.status(401).json({ success: 0, message: '认证失败' }); }
   transact(db => audit(db, req, 'admin.login_success'));
   res.cookie('admin_session', makeAdminCookie(), { httpOnly: true, sameSite: 'strict', secure: IS_PROD, maxAge: 12 * 60 * 60 * 1000 });
   res.json({ success: 1 });
