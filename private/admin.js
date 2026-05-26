@@ -71,7 +71,7 @@ function render() {
   if (!state) return;
   const c = state.config;
   $('balance').textContent = JSON.stringify(state.balance);
-  ['country', 'service', 'pool', 'maxPrice', 'pricingOption', 'maxAccountUses', 'timeoutSeconds', 'changeNumberAfterSeconds', 'pollIntervalSeconds', 'resendCooldownSeconds', 'refundRetrySeconds', 'mockMode', 'mockReceiveAfterChecks', 'purchaseEnabled', 'purchaseUrl', 'purchaseTextZh', 'purchaseTextEn'].forEach(k => { $(k).value = c[k] ?? ''; });
+  ['country', 'service', 'pool', 'maxPrice', 'pricingOption', 'maxAccountUses', 'freshNumberPoolThreshold', 'successfulReuseThreshold', 'timeoutSeconds', 'changeNumberAfterSeconds', 'pollIntervalSeconds', 'resendCooldownSeconds', 'refundRetrySeconds', 'mockMode', 'mockReceiveAfterChecks', 'purchaseEnabled', 'purchaseUrl', 'purchaseTextZh', 'purchaseTextEn'].forEach(k => { $(k).value = c[k] ?? ''; });
   $('apiKey').value = '';
   renderCountryOptions();
   $('cdkRows').innerHTML = state.cdks.map(x => `<tr><td>${escapeHtml(x.code)}</td><td>${escapeHtml(x.status)}</td><td>${escapeHtml(x.createdAt || '')}</td><td>${escapeHtml(x.usedAt || x.redeemedAt || '')}</td><td>${escapeHtml(x.note || '')}</td><td><button class="secondary" data-redeem="${escapeHtml(x.code)}">核销</button></td></tr>`).join('');
@@ -91,7 +91,7 @@ function escapeHtml(s) { return String(s).replace(/[&<>"]/g, m => ({ '&': '&amp;
 async function saveConfig() {
   try {
     const body = {};
-    ['apiKey', 'country', 'service', 'pool', 'maxPrice', 'pricingOption', 'maxAccountUses', 'timeoutSeconds', 'changeNumberAfterSeconds', 'pollIntervalSeconds', 'resendCooldownSeconds', 'refundRetrySeconds', 'mockMode', 'mockReceiveAfterChecks', 'purchaseEnabled', 'purchaseUrl', 'purchaseTextZh', 'purchaseTextEn'].forEach(k => { if (k === 'apiKey' && !$(k).value) return; body[k] = k === 'country' ? normalizeCountryValue($(k).value) : $(k).value; });
+    ['apiKey', 'country', 'service', 'pool', 'maxPrice', 'pricingOption', 'maxAccountUses', 'freshNumberPoolThreshold', 'successfulReuseThreshold', 'timeoutSeconds', 'changeNumberAfterSeconds', 'pollIntervalSeconds', 'resendCooldownSeconds', 'refundRetrySeconds', 'mockMode', 'mockReceiveAfterChecks', 'purchaseEnabled', 'purchaseUrl', 'purchaseTextZh', 'purchaseTextEn'].forEach(k => { if (k === 'apiKey' && !$(k).value) return; body[k] = k === 'country' ? normalizeCountryValue($(k).value) : $(k).value; });
     await req('/api/admin/config', { method: 'POST', body: JSON.stringify(body) });
     toast(t('saved'));
     await load();

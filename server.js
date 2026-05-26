@@ -482,8 +482,6 @@ function extractMessage(data) {
   return null;
 }
 
-const REUSE_POOL_THRESHOLD = Number(process.env.REUSE_POOL_THRESHOLD || 10);
-const SUCCESSFUL_REUSE_THRESHOLD = Number(process.env.SUCCESSFUL_REUSE_THRESHOLD || 5);
 const BUSY_ACCOUNT_STATUSES = new Set(['waiting', 'resending']);
 const TERMINAL_ACCOUNT_STATUSES = new Set(['failed', 'refund_pending', 'refunded', 'used_up']);
 
@@ -534,11 +532,13 @@ function isRetryCdk(db, cdkCode) {
 
 function findReusableAccount(db, config, { cdkCode = '', forceReuse = false } = {}) {
   const successfulAccounts = reusableSuccessfulAccounts(db, config);
-  const shouldPreferSuccessful = forceReuse || isRetryCdk(db, cdkCode) || successfulAccounts.length > SUCCESSFUL_REUSE_THRESHOLD;
+  const successfulReuseThreshold = Number(config.successfulReuseThreshold ?? process.env.SUCCESSFUL_REUSE_THRESHOLD ?? 5);
+  const freshNumberPoolThreshold = Number(config.freshNumberPoolThreshold ?? process.env.FRESH_NUMBER_POOL_THRESHOLD ?? process.env.REUSE_POOL_THRESHOLD ?? 10);
+  const shouldPreferSuccessful = forceReuse || isRetryCdk(db, cdkCode) || successfulAccounts.length > successfulReuseThreshold;
 
   // Normal path: keep buying fresh numbers until the matching, still-usable pool grows past
-  // REUSE_POOL_THRESHOLD. Retry CDKs, or a proven-successful pool of >5 numbers, prefer resend.
-  if (!shouldPreferSuccessful && countReusablePoolAccounts(db, config) <= REUSE_POOL_THRESHOLD) return null;
+  // freshNumberPoolThreshold. Retry CDKs, or a proven-successful pool above successfulReuseThreshold, prefer resend.
+  if (!shouldPreferSuccessful && countReusablePoolAccounts(db, config) <= freshNumberPoolThreshold) return null;
 
   return successfulAccounts
     .sort((a, b) => Number(b.useCount || 0) - Number(a.useCount || 0) || String(a.createdAt).localeCompare(String(b.createdAt)))[0];
@@ -1201,11 +1201,11 @@ app.get('/api/admin/overview', requireAdmin, async (req, res) => {
 });
 
 app.post('/api/admin/config', requireSameOrigin, requireAdmin, (req, res) => {
-  const allowed = ['apiKey', 'country', 'service', 'pool', 'maxPrice', 'pricingOption', 'maxAccountUses', 'timeoutSeconds', 'changeNumberAfterSeconds', 'pollIntervalSeconds', 'mockMode', 'mockReceiveAfterChecks', 'purchaseEnabled', 'purchaseUrl', 'purchaseTextZh', 'purchaseTextEn', 'resendCooldownSeconds', 'refundRetrySeconds'];
+  const allowed = ['apiKey', 'country', 'service', 'pool', 'maxPrice', 'pricingOption', 'maxAccountUses', 'timeoutSeconds', 'changeNumberAfterSeconds', 'pollIntervalSeconds', 'mockMode', 'mockReceiveAfterChecks', 'purchaseEnabled', 'purchaseUrl', 'purchaseTextZh', 'purchaseTextEn', 'resendCooldownSeconds', 'refundRetrySeconds', 'freshNumberPoolThreshold', 'successfulReuseThreshold'];
   const updated = transact(db => {
     for (const k of allowed) {
       if (req.body[k] !== undefined) {
-        if (['maxAccountUses', 'timeoutSeconds', 'changeNumberAfterSeconds', 'pollIntervalSeconds', 'mockReceiveAfterChecks', 'resendCooldownSeconds', 'refundRetrySeconds'].includes(k)) db.config[k] = Number(req.body[k]);
+        if (['maxAccountUses', 'timeoutSeconds', 'changeNumberAfterSeconds', 'pollIntervalSeconds', 'mockReceiveAfterChecks', 'resendCooldownSeconds', 'refundRetrySeconds', 'freshNumberPoolThreshold', 'successfulReuseThreshold'].includes(k)) db.config[k] = Number(req.body[k]);
         else if (k === 'mockMode' || k === 'purchaseEnabled') db.config[k] = req.body[k] === true || req.body[k] === 'true' || req.body[k] === '1' || req.body[k] === 'on';
         else if (k === 'apiKey' && String(req.body[k]) === '********') continue;
         else if (k === 'apiKey') db.config[k] = storeApiKey(String(req.body[k] ?? ''));
