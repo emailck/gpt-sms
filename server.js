@@ -556,6 +556,7 @@ function isRetryCdk(db, cdkCode) {
 }
 
 function findReusableAccount(db, config, { cdkCode = '', forceReuse = false } = {}) {
+  if (config.reuseUsedNumbersEnabled === false || String(config.reuseUsedNumbersEnabled).toLowerCase() === 'false') return null;
   const successfulAccounts = reusableSuccessfulAccounts(db, config);
   const successfulReuseThreshold = Number(config.successfulReuseThreshold ?? process.env.SUCCESSFUL_REUSE_THRESHOLD ?? 5);
   const retryFlow = forceReuse || isRetryCdk(db, cdkCode);
@@ -1226,12 +1227,12 @@ app.get('/api/admin/overview', requireAdmin, async (req, res) => {
 });
 
 app.post('/api/admin/config', requireSameOrigin, requireAdmin, (req, res) => {
-  const allowed = ['apiKey', 'country', 'service', 'pool', 'maxPrice', 'pricingOption', 'maxAccountUses', 'timeoutSeconds', 'changeNumberAfterSeconds', 'pollIntervalSeconds', 'mockMode', 'mockReceiveAfterChecks', 'purchaseEnabled', 'purchaseUrl', 'purchaseTextZh', 'purchaseTextEn', 'resendCooldownSeconds', 'refundRetrySeconds', 'successfulReuseThreshold'];
+  const allowed = ['apiKey', 'country', 'service', 'pool', 'maxPrice', 'pricingOption', 'maxAccountUses', 'timeoutSeconds', 'changeNumberAfterSeconds', 'pollIntervalSeconds', 'mockMode', 'mockReceiveAfterChecks', 'purchaseEnabled', 'purchaseUrl', 'purchaseTextZh', 'purchaseTextEn', 'resendCooldownSeconds', 'refundRetrySeconds', 'successfulReuseThreshold', 'reuseUsedNumbersEnabled'];
   const updated = transact(db => {
     for (const k of allowed) {
       if (req.body[k] !== undefined) {
         if (['maxAccountUses', 'timeoutSeconds', 'changeNumberAfterSeconds', 'pollIntervalSeconds', 'mockReceiveAfterChecks', 'resendCooldownSeconds', 'refundRetrySeconds', 'successfulReuseThreshold'].includes(k)) db.config[k] = Number(req.body[k]);
-        else if (k === 'mockMode' || k === 'purchaseEnabled') db.config[k] = req.body[k] === true || req.body[k] === 'true' || req.body[k] === '1' || req.body[k] === 'on';
+        else if (k === 'mockMode' || k === 'purchaseEnabled' || k === 'reuseUsedNumbersEnabled') db.config[k] = req.body[k] === true || req.body[k] === 'true' || req.body[k] === '1' || req.body[k] === 'on';
         else if (k === 'apiKey' && String(req.body[k]) === '********') continue;
         else if (k === 'apiKey') db.config[k] = storeApiKey(String(req.body[k] ?? ''));
         else db.config[k] = String(req.body[k] ?? '');

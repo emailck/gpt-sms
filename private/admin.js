@@ -71,12 +71,15 @@ function render() {
   if (!state) return;
   const c = state.config;
   $('balance').textContent = JSON.stringify(state.balance);
-  ['country', 'service', 'pool', 'maxPrice', 'pricingOption', 'maxAccountUses', 'successfulReuseThreshold', 'timeoutSeconds', 'changeNumberAfterSeconds', 'pollIntervalSeconds', 'resendCooldownSeconds', 'refundRetrySeconds', 'mockMode', 'mockReceiveAfterChecks', 'purchaseEnabled', 'purchaseUrl', 'purchaseTextZh', 'purchaseTextEn'].forEach(k => { $(k).value = c[k] ?? ''; });
+  ['country', 'service', 'pool', 'maxPrice', 'pricingOption', 'maxAccountUses', 'successfulReuseThreshold', 'reuseUsedNumbersEnabled', 'timeoutSeconds', 'changeNumberAfterSeconds', 'pollIntervalSeconds', 'resendCooldownSeconds', 'refundRetrySeconds', 'mockMode', 'mockReceiveAfterChecks', 'purchaseEnabled', 'purchaseUrl', 'purchaseTextZh', 'purchaseTextEn'].forEach(k => { $(k).value = c[k] ?? ''; });
   $('apiKey').value = '';
   renderCountryOptions();
   $('cdkRows').innerHTML = state.cdks.map(x => `<tr><td>${escapeHtml(x.code)}</td><td>${escapeHtml(x.status)}</td><td>${escapeHtml(x.createdAt || '')}</td><td>${escapeHtml(x.usedAt || x.redeemedAt || '')}</td><td>${escapeHtml(x.note || '')}</td><td><button class="secondary" data-redeem="${escapeHtml(x.code)}">核销</button></td></tr>`).join('');
   document.querySelectorAll('[data-redeem]').forEach(b => b.onclick = () => redeemCdks(b.dataset.redeem));
-  $('accountRows').innerHTML = state.accounts.map(x => `<tr><td>${escapeHtml(x.phone || '-')}</td><td>${x.useCount}/${x.maxUses}</td><td>${escapeHtml(x.status)}</td><td>${escapeHtml(x.orderid)}</td><td>${escapeHtml(x.updatedAt || '')}</td></tr>`).join('');
+  renderAccountFilter();
+  const accountStatus = $('accountStatusFilter')?.value || '';
+  const accounts = accountStatus ? state.accounts.filter(x => String(x.status || '') === accountStatus) : state.accounts;
+  $('accountRows').innerHTML = accounts.map(x => `<tr><td>${escapeHtml(x.phone || '-')}</td><td>${x.useCount}/${x.maxUses}</td><td>${escapeHtml(x.status)}</td><td>${escapeHtml(x.orderid)}</td><td>${escapeHtml(x.updatedAt || '')}</td></tr>`).join('');
   $('sessionRows').innerHTML = state.sessions.map(x => `<tr><td>${escapeHtml(x.id)}</td><td>${escapeHtml(x.phone || '-')}</td><td>${escapeHtml(x.status)}</td><td>${x.message ? escapeHtml(x.message.text || JSON.stringify(x.message.raw)) : ''}</td><td>${escapeHtml(x.deadlineAt || '')}</td></tr>`).join('');
   $('clientRows').innerHTML = (state.clients || []).map(c => `<tr><td>${escapeHtml(c.name)}</td><td>${escapeHtml(c.apiKeyPrefix || '')}</td><td>${c.balance}</td><td>${c.pricePerSuccess}</td><td>${escapeHtml(c.status)}</td><td><button class="secondary" data-recharge="${escapeHtml(c.id)}">充值</button> <button class="secondary" data-reset-key="${escapeHtml(c.id)}">重置Key</button> <button class="danger" data-toggle-client="${escapeHtml(c.id)}" data-status="${escapeHtml(c.status)}">${c.status === 'active' ? '禁用' : '启用'}</button></td></tr>`).join('');
   document.querySelectorAll('[data-recharge]').forEach(b => b.onclick = () => rechargeClient(b.dataset.recharge));
@@ -86,12 +89,22 @@ function render() {
   $('auditRows').innerHTML = (state.auditLogs || []).map(x => `<tr><td>${escapeHtml(x.createdAt || '')}</td><td>${escapeHtml(x.event || '')}</td><td>${escapeHtml(x.ip || '')}</td><td>${escapeHtml(x.userAgent || '')}</td><td><code>${escapeHtml(JSON.stringify(x.data || {}))}</code></td></tr>`).join('');
 }
 
+
+function renderAccountFilter() {
+  const sel = $('accountStatusFilter');
+  if (!sel || !state) return;
+  const current = sel.value || '';
+  const statuses = [...new Set((state.accounts || []).map(x => String(x.status || '')).filter(Boolean))].sort();
+  sel.innerHTML = '<option value="">全部状态</option>' + statuses.map(s => `<option value="${escapeHtml(s)}">${escapeHtml(s)}</option>`).join('');
+  sel.value = statuses.includes(current) ? current : '';
+}
+
 function escapeHtml(s) { return String(s).replace(/[&<>"]/g, m => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[m])); }
 
 async function saveConfig() {
   try {
     const body = {};
-    ['apiKey', 'country', 'service', 'pool', 'maxPrice', 'pricingOption', 'maxAccountUses', 'successfulReuseThreshold', 'timeoutSeconds', 'changeNumberAfterSeconds', 'pollIntervalSeconds', 'resendCooldownSeconds', 'refundRetrySeconds', 'mockMode', 'mockReceiveAfterChecks', 'purchaseEnabled', 'purchaseUrl', 'purchaseTextZh', 'purchaseTextEn'].forEach(k => { if (k === 'apiKey' && !$(k).value) return; body[k] = k === 'country' ? normalizeCountryValue($(k).value) : $(k).value; });
+    ['apiKey', 'country', 'service', 'pool', 'maxPrice', 'pricingOption', 'maxAccountUses', 'successfulReuseThreshold', 'reuseUsedNumbersEnabled', 'timeoutSeconds', 'changeNumberAfterSeconds', 'pollIntervalSeconds', 'resendCooldownSeconds', 'refundRetrySeconds', 'mockMode', 'mockReceiveAfterChecks', 'purchaseEnabled', 'purchaseUrl', 'purchaseTextZh', 'purchaseTextEn'].forEach(k => { if (k === 'apiKey' && !$(k).value) return; body[k] = k === 'country' ? normalizeCountryValue($(k).value) : $(k).value; });
     await req('/api/admin/config', { method: 'POST', body: JSON.stringify(body) });
     toast(t('saved'));
     await load();
@@ -115,6 +128,7 @@ $('createClient').onclick = createClient;
 $('refreshCountries').onclick = () => loadCountries(true);
 $('country').addEventListener('change', renderCountryOptions);
 $('country').addEventListener('input', renderCountryOptions);
+$('accountStatusFilter').onchange = render;
 $('langBtn').onclick = () => { lang = lang === 'zh' ? 'en' : 'zh'; localStorage.lang = lang; applyLang(); };
 applyLang();
 restoreLogin();

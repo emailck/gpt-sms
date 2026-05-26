@@ -28,6 +28,7 @@ export const DEFAULT_CONFIG = {
   resendCooldownSeconds: Number(process.env.RESEND_COOLDOWN_SECONDS || 300),
   refundRetrySeconds: Number(process.env.REFUND_RETRY_SECONDS || 600),
   successfulReuseThreshold: Number(process.env.SUCCESSFUL_REUSE_THRESHOLD || 5),
+  reuseUsedNumbersEnabled: String(process.env.REUSE_USED_NUMBERS_ENABLED || 'true').toLowerCase() !== 'false',
 };
 
 const DEFAULT_DB = {
@@ -50,6 +51,7 @@ function normalizeDb(db) {
   if (process.env.CHANGE_NUMBER_AFTER_SECONDS) db.config.changeNumberAfterSeconds = Number(process.env.CHANGE_NUMBER_AFTER_SECONDS);
   if (process.env.REFUND_RETRY_SECONDS) db.config.refundRetrySeconds = Number(process.env.REFUND_RETRY_SECONDS);
   if (process.env.SUCCESSFUL_REUSE_THRESHOLD) db.config.successfulReuseThreshold = Number(process.env.SUCCESSFUL_REUSE_THRESHOLD);
+  if (process.env.REUSE_USED_NUMBERS_ENABLED) db.config.reuseUsedNumbersEnabled = String(process.env.REUSE_USED_NUMBERS_ENABLED).toLowerCase() !== 'false';
   db.cdks ||= [];
   db.accounts ||= [];
   db.sessions ||= [];
