@@ -125,10 +125,22 @@ function clientFromAuth(req) {
   return client ? { db, client } : null;
 }
 
+function auditApi(req, event, data = {}) {
+  try { transact(db => audit(db, req, event, { path: req.path, method: req.method, clientId: req.apiClient?.id, ...data })); } catch {}
+}
+
 function requireApiClient(req, res, next) {
   const found = clientFromAuth(req);
-  if (!found) return res.status(401).json({ success: 0, code: 'INVALID_AUTH', message: '认证失败' });
-  if ((found.client.status || 'active') !== 'active') return res.status(403).json({ success: 0, code: 'CLIENT_DISABLED', message: '客户已禁用' });
+  if (!found) {
+    const auth = String(req.get('authorization') || '');
+    auditApi(req, 'api.auth_failed', { hasAuthorization: !!auth, keyPrefix: auth.replace(/^Bearer\s+/i, '').slice(0, 22) || '' });
+    return res.status(401).json({ success: 0, code: 'INVALID_AUTH', message: '认证失败' });
+  }
+  if ((found.client.status || 'active') !== 'active') {
+    req.apiClient = found.client;
+    auditApi(req, 'api.client_disabled', { status: found.client.status || 'disabled' });
+    return res.status(403).json({ success: 0, code: 'CLIENT_DISABLED', message: '客户已禁用' });
+  }
   req.apiClient = found.client;
   next();
 }
@@ -848,6 +860,7 @@ function apiNumberResponse(allocated) {
 app.get('/api/v1/balance', requireApiClient, (req, res) => {
   const db = readDb();
   const client = db.clients.find(c => c.id === req.apiClient.id);
+  auditApi(req, 'api.balance', { balance: Number(client.balance || 0), status: client.status || 'active' });
   res.json({ success: 1, balance: Number(client.balance || 0), pricePerSuccess: Number(client.pricePerSuccess || 1), status: client.status || 'active' });
 });
 
@@ -855,20 +868,21 @@ app.post('/api/v1/number', requireApiClient, async (req, res, next) => {
   try {
     const db = readDb();
     const client = db.clients.find(c => c.id === req.apiClient.id);
-    ensureClientBalance(client);
+    try { ensureClientBalance(client); } catch (e) { auditApi(req, 'api.number_rejected', { reason: e.code || 'INSUFFICIENT_BALANCE', balance: Number(client.balance || 0), pricePerSuccess: Number(client.pricePerSuccess || 1) }); throw e; }
     const externalId = String(req.body?.externalId || '').trim().slice(0, 120);
     if (externalId) {
       const existing = db.sessions.find(s => s.clientId === client.id && s.externalId === externalId && ['waiting', 'received'].includes(String(s.status || '')));
       if (existing) {
         const account = db.accounts.find(a => a.id === existing.accountId);
+        auditApi(req, 'api.number_idempotent', { sessionId: existing.id, accountId: existing.accountId, externalId, status: existing.status });
         return res.json({ success: 1, ...apiSessionPayload(existing, account, client), sessionToken: null, idempotent: true, pollIntervalSeconds: db.config.pollIntervalSeconds });
       }
     }
     const virtualCdk = { code: `API-${client.id}-${makeId('req')}`, status: 'active' };
     const allocated = await allocateSession(virtualCdk.code, { virtualCdk, clientId: client.id, externalId });
-    transact(wdb => audit(wdb, req, 'api.number_allocated', { clientId: client.id, sessionId: allocated.session.id, accountId: allocated.account.id, externalId, reused: allocated.reused }));
+    transact(wdb => audit(wdb, req, 'api.number_allocated', { clientId: client.id, sessionId: allocated.session.id, accountId: allocated.account.id, externalId, reused: allocated.reused, phone: allocated.account.phone, country: allocated.account.country, service: allocated.account.service, pool: allocated.account.pool }));
     res.json(apiNumberResponse(allocated));
-  } catch (e) { next(e); }
+  } catch (e) { auditApi(req, 'api.number_error', { message: e.message, status: e.status || 500, code: e.code || '', details: e.details || null }); next(e); }
 });
 
 app.post('/api/v1/session/check', requireApiClient, async (req, res, next) => {
@@ -878,13 +892,14 @@ app.post('/api/v1/session/check', requireApiClient, async (req, res, next) => {
     const token = String(req.body.sessionToken);
     const db = readDb();
     const session = db.sessions.find(s => s.id === sessionId && s.clientId === req.apiClient.id);
-    if (!session) return res.status(404).json({ success: 0, code: 'SESSION_NOT_FOUND', message: '会话不存在' });
-    if (!session.sessionTokenHash || hashToken(token) !== session.sessionTokenHash) return res.status(403).json({ success: 0, code: 'SESSION_FORBIDDEN', message: '无权访问该会话' });
+    if (!session) { auditApi(req, 'api.check_rejected', { reason: 'SESSION_NOT_FOUND', sessionId }); return res.status(404).json({ success: 0, code: 'SESSION_NOT_FOUND', message: '会话不存在' }); }
+    if (!session.sessionTokenHash || hashToken(token) !== session.sessionTokenHash) { auditApi(req, 'api.check_rejected', { reason: 'SESSION_FORBIDDEN', sessionId }); return res.status(403).json({ success: 0, code: 'SESSION_FORBIDDEN', message: '无权访问该会话' }); }
     const account = db.accounts.find(a => a.id === session.accountId);
-    if (!account) return res.status(404).json({ success: 0, code: 'NUMBER_NOT_FOUND', message: '号码不存在' });
+    if (!account) { auditApi(req, 'api.check_rejected', { reason: 'NUMBER_NOT_FOUND', sessionId, accountId: session.accountId }); return res.status(404).json({ success: 0, code: 'NUMBER_NOT_FOUND', message: '号码不存在' }); }
 
     if (session.status === 'received' || session.counted) {
       const client = readDb().clients.find(c => c.id === req.apiClient.id);
+      auditApi(req, 'api.check_already_received', { sessionId, accountId: account.id, externalId: session.externalId || '', billed: !!session.billed });
       return res.json({ success: 1, ...apiSessionPayload(session, account, client) });
     }
 
@@ -949,8 +964,9 @@ app.post('/api/v1/session/check', requireApiClient, async (req, res, next) => {
     });
     const payload = apiSessionPayload(updated.session, updated.account, updated.client);
     if (updated.session.billingId) payload.billing.charged = !!msg && !!updated.session.billed;
+    auditApi(req, 'api.check_result', { sessionId, accountId: account.id, externalId: session.externalId || '', received: !!msg, upstreamSuccess: data?.success ?? null, status: updated.session.status });
     res.json({ success: 1, timedOut: false, ...payload });
-  } catch (e) { next(e); }
+  } catch (e) { auditApi(req, 'api.check_error', { message: e.message, status: e.status || 500, code: e.code || '', sessionId: req.body?.sessionId || '' }); next(e); }
 });
 
 app.post('/api/v1/session/change-number', requireApiClient, async (req, res, next) => {
@@ -962,10 +978,10 @@ app.post('/api/v1/session/change-number', requireApiClient, async (req, res, nex
     const client = snapshot.clients.find(c => c.id === req.apiClient.id);
     ensureClientBalance(client);
     const oldSession = snapshot.sessions.find(s => s.id === oldId && s.clientId === client.id);
-    if (!oldSession) return res.status(404).json({ success: 0, code: 'SESSION_NOT_FOUND', message: '会话不存在' });
-    if (!oldSession.sessionTokenHash || hashToken(token) !== oldSession.sessionTokenHash) return res.status(403).json({ success: 0, code: 'SESSION_FORBIDDEN', message: '无权访问该会话' });
-    if (oldSession.status === 'received' || oldSession.counted) return res.status(400).json({ success: 0, code: 'SMS_RECEIVED_CANNOT_CHANGE', message: '已收到短信，不能更换号码' });
-    if (oldSession.status === 'waiting' && !canChangeSession(oldSession, snapshot.config)) return res.status(400).json({ success: 0, code: 'CHANGE_TOO_EARLY', message: '等待满 2 分钟后才能更换号码' });
+    if (!oldSession) { auditApi(req, 'api.change_rejected', { reason: 'SESSION_NOT_FOUND', sessionId: oldId }); return res.status(404).json({ success: 0, code: 'SESSION_NOT_FOUND', message: '会话不存在' }); }
+    if (!oldSession.sessionTokenHash || hashToken(token) !== oldSession.sessionTokenHash) { auditApi(req, 'api.change_rejected', { reason: 'SESSION_FORBIDDEN', sessionId: oldId }); return res.status(403).json({ success: 0, code: 'SESSION_FORBIDDEN', message: '无权访问该会话' }); }
+    if (oldSession.status === 'received' || oldSession.counted) { auditApi(req, 'api.change_rejected', { reason: 'SMS_RECEIVED_CANNOT_CHANGE', sessionId: oldId }); return res.status(400).json({ success: 0, code: 'SMS_RECEIVED_CANNOT_CHANGE', message: '已收到短信，不能更换号码' }); }
+    if (oldSession.status === 'waiting' && !canChangeSession(oldSession, snapshot.config)) { auditApi(req, 'api.change_rejected', { reason: 'CHANGE_TOO_EARLY', sessionId: oldId, canChangeAt: oldSession.canChangeAt || addSecondsIsoFrom(oldSession.createdAt, snapshot.config.changeNumberAfterSeconds || 120) }); return res.status(400).json({ success: 0, code: 'CHANGE_TOO_EARLY', message: '等待满 2 分钟后才能更换号码' }); }
     const oldAccount = snapshot.accounts.find(a => a.id === oldSession.accountId);
     transact(db => {
       const s = db.sessions.find(x => x.id === oldId);
@@ -980,8 +996,9 @@ app.post('/api/v1/session/change-number', requireApiClient, async (req, res, nex
     }
     const virtualCdk = { code: `API-${client.id}-${makeId('req')}`, status: 'active' };
     const allocated = await allocateSession(virtualCdk.code, { virtualCdk, clientId: client.id, externalId: oldSession.externalId || '' });
+    auditApi(req, 'api.change_allocated', { oldSessionId: oldId, newSessionId: allocated.session.id, accountId: allocated.account.id, externalId: oldSession.externalId || '', reused: allocated.reused, phone: allocated.account.phone });
     res.json(apiNumberResponse(allocated));
-  } catch (e) { next(e); }
+  } catch (e) { auditApi(req, 'api.change_error', { message: e.message, status: e.status || 500, code: e.code || '', sessionId: req.body?.sessionId || '' }); next(e); }
 });
 
 app.get('/api/public-config', (req, res) => {
