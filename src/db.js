@@ -27,7 +27,6 @@ export const DEFAULT_CONFIG = {
   purchaseTextEn: process.env.PURCHASE_TEXT_EN || 'Buy',
   resendCooldownSeconds: Number(process.env.RESEND_COOLDOWN_SECONDS || 300),
   refundRetrySeconds: Number(process.env.REFUND_RETRY_SECONDS || 600),
-  freshNumberPoolThreshold: Number(process.env.FRESH_NUMBER_POOL_THRESHOLD || process.env.REUSE_POOL_THRESHOLD || 10),
   successfulReuseThreshold: Number(process.env.SUCCESSFUL_REUSE_THRESHOLD || 5),
 };
 
@@ -50,7 +49,6 @@ function normalizeDb(db) {
   if (process.env.TIMEOUT_SECONDS) db.config.timeoutSeconds = Number(process.env.TIMEOUT_SECONDS);
   if (process.env.CHANGE_NUMBER_AFTER_SECONDS) db.config.changeNumberAfterSeconds = Number(process.env.CHANGE_NUMBER_AFTER_SECONDS);
   if (process.env.REFUND_RETRY_SECONDS) db.config.refundRetrySeconds = Number(process.env.REFUND_RETRY_SECONDS);
-  if (process.env.FRESH_NUMBER_POOL_THRESHOLD || process.env.REUSE_POOL_THRESHOLD) db.config.freshNumberPoolThreshold = Number(process.env.FRESH_NUMBER_POOL_THRESHOLD || process.env.REUSE_POOL_THRESHOLD);
   if (process.env.SUCCESSFUL_REUSE_THRESHOLD) db.config.successfulReuseThreshold = Number(process.env.SUCCESSFUL_REUSE_THRESHOLD);
   db.cdks ||= [];
   db.accounts ||= [];
