@@ -8,6 +8,7 @@ import cookieParser from 'cookie-parser';
 import dotenv from 'dotenv';
 import { transact, readDb, writeDb, makeId, makeCdk, nowIso, addSecondsIso, safeConfig, getRuntimeConfig, storeApiKey } from './src/db.js';
 import { getBalance, listCountries, listServices, listPools, getPrice, getStock, purchaseSms, checkSms, cancelSms, resendSms, retrieveValidPools, SmsPoolError } from './src/smspool.js';
+import { encryptSecret, decryptSecret } from './src/crypto.js';
 
 dotenv.config();
 
@@ -225,6 +226,30 @@ function randomToken() {
 
 function hashToken(token) {
   return createHmac('sha256', APP_SECRET).update(String(token)).digest('hex');
+}
+
+function sessionTokenFromSession(session) {
+  try {
+    const token = decryptSecret(session?.sessionTokenEncrypted || '');
+    return token && hashToken(token) === session?.sessionTokenHash ? token : '';
+  } catch { return ''; }
+}
+
+function recoverOrRotateSessionToken(sessionId, req = null) {
+  const snapshot = readDb();
+  const existing = snapshot.sessions.find(s => s.id === sessionId);
+  const recovered = sessionTokenFromSession(existing);
+  if (recovered) return recovered;
+  const sessionToken = randomToken();
+  transact(db => {
+    const s = db.sessions.find(x => x.id === sessionId);
+    if (!s) return;
+    s.sessionTokenHash = hashToken(sessionToken);
+    s.sessionTokenEncrypted = encryptSecret(sessionToken);
+    s.updatedAt = nowIso();
+    audit(db, req, 'api.session_token_rotated', { clientId: s.clientId || null, sessionId: s.id, externalId: s.externalId || '' });
+  });
+  return sessionToken;
 }
 
 function verifySessionAccess(req, session) {
@@ -791,7 +816,7 @@ async function allocateSession(cdkCode, opts = {}) {
       delete a.resendingAt;
       const sessionToken = randomToken();
       const session = {
-        id: makeId('sess'), sessionTokenHash: hashToken(sessionToken), cdk: c.code, accountId: a.id, orderid: a.orderid, phone: a.phone,
+        id: makeId('sess'), sessionTokenHash: hashToken(sessionToken), sessionTokenEncrypted: encryptSecret(sessionToken), cdk: c.code, accountId: a.id, orderid: a.orderid, phone: a.phone,
         country: a.country, service: a.service, pool: a.pool || '', status: 'waiting', counted: false,
         reused: true, clientId: opts.clientId || null, externalId: opts.externalId || '', billed: false, createdAt: nowIso(), updatedAt: nowIso(), deadlineAt: addSecondsIso(config.timeoutSeconds || 120),
       };
@@ -824,7 +849,7 @@ async function allocateSession(cdkCode, opts = {}) {
     };
     const sessionToken = randomToken();
     const session = {
-      id: makeId('sess'), sessionTokenHash: hashToken(sessionToken), cdk: c.code, accountId: account.id, orderid, phone,
+      id: makeId('sess'), sessionTokenHash: hashToken(sessionToken), sessionTokenEncrypted: encryptSecret(sessionToken), cdk: c.code, accountId: account.id, orderid, phone,
       country: account.country, service: account.service, pool: account.pool, status: 'waiting', counted: false,
       reused: false, clientId: opts.clientId || null, externalId: opts.externalId || '', billed: false, createdAt: nowIso(), updatedAt: nowIso(), deadlineAt: addSecondsIso(config.timeoutSeconds || 120),
     };
@@ -873,8 +898,9 @@ app.post('/api/v1/number', requireApiClient, async (req, res, next) => {
       const existing = db.sessions.find(s => s.clientId === client.id && s.externalId === externalId && ['waiting', 'received'].includes(String(s.status || '')));
       if (existing) {
         const account = db.accounts.find(a => a.id === existing.accountId);
-        auditApi(req, 'api.number_idempotent', { sessionId: existing.id, accountId: existing.accountId, externalId, status: existing.status });
-        return res.json({ success: 1, ...apiSessionPayload(existing, account, client), sessionToken: null, idempotent: true, pollIntervalSeconds: db.config.pollIntervalSeconds });
+        const sessionToken = recoverOrRotateSessionToken(existing.id, req);
+        auditApi(req, 'api.number_idempotent', { sessionId: existing.id, accountId: existing.accountId, externalId, status: existing.status, tokenRecovered: !!sessionToken });
+        return res.json({ success: 1, ...apiSessionPayload(existing, account, client), sessionToken, idempotent: true, pollIntervalSeconds: db.config.pollIntervalSeconds });
       }
     }
     const virtualCdk = { code: `API-${client.id}-${makeId('req')}`, status: 'active' };

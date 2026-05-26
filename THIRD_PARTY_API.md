@@ -59,7 +59,7 @@ Content-Type: application/json
 }
 ```
 
-`externalId` 可选。传入后具有幂等效果：同一个客户、同一个 `externalId`，如果已有 `waiting` 或 `received` 会话，会直接返回已有会话，避免重复占号。
+`externalId` 可选。传入后具有幂等效果：同一个客户、同一个 `externalId`，如果已有 `waiting` 或 `received` 会话，会直接返回已有会话和可用于查码的 `sessionToken`，避免重复占号。
 
 响应：
 
