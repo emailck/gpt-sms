@@ -25,6 +25,9 @@ if (IS_PROD) {
   }
 }
 const ADMIN_PATH = process.env.ADMIN_PATH || '/manage-' + createHash('sha256').update(ADMIN_TOKEN).digest('hex').slice(0, 12);
+const STATS_TIMEZONE = process.env.STATS_TIMEZONE || 'Asia/Shanghai';
+const FRONTEND_PRESENCE_TTL_MS = Number(process.env.FRONTEND_PRESENCE_TTL_SECONDS || 90) * 1000;
+const frontendPresence = new Map();
 
 app.disable('x-powered-by');
 if (process.env.TRUST_PROXY || IS_PROD) {
@@ -398,6 +401,145 @@ function publicSession(session, account, { admin = false, revealPhone = false } 
   };
 }
 
+function clampInt(value, min, max, fallback) {
+  const n = Number.parseInt(String(value ?? ''), 10);
+  if (!Number.isFinite(n)) return fallback;
+  return Math.min(Math.max(n, min), max);
+}
+
+function dayKey(value, timeZone = STATS_TIMEZONE) {
+  const d = value instanceof Date ? value : new Date(value);
+  if (!Number.isFinite(d.getTime())) return '';
+  try {
+    const parts = new Intl.DateTimeFormat('en-CA', {
+      timeZone,
+      year: 'numeric',
+      month: '2-digit',
+      day: '2-digit',
+    }).formatToParts(d);
+    const m = Object.fromEntries(parts.map(p => [p.type, p.value]));
+    return `${m.year}-${m.month}-${m.day}`;
+  } catch {
+    return d.toISOString().slice(0, 10);
+  }
+}
+
+function addDaysKey(dateKey, delta) {
+  const d = new Date(`${dateKey}T00:00:00.000Z`);
+  d.setUTCDate(d.getUTCDate() + delta);
+  return d.toISOString().slice(0, 10);
+}
+
+function emptyDailyStatsRow(date) {
+  return {
+    date,
+    sessions: 0,
+    success: 0,
+    timeout: 0,
+    changed: 0,
+    waiting: 0,
+    apiSessions: 0,
+    cdkSessions: 0,
+    reusedSessions: 0,
+    newSessions: 0,
+    accounts: 0,
+    cdkCreated: 0,
+    cdkUsed: 0,
+    smsCharged: 0,
+    recharge: 0,
+    billingNet: 0,
+    successRate: 0,
+  };
+}
+
+function buildDailyStats(db, { days = 30, timeZone = STATS_TIMEZONE } = {}) {
+  days = clampInt(days, 1, 366, 30);
+  const today = dayKey(new Date(), timeZone);
+  const start = addDaysKey(today, -(days - 1));
+  const byDate = new Map();
+  for (let i = 0; i < days; i++) {
+    const date = addDaysKey(start, i);
+    byDate.set(date, emptyDailyStatsRow(date));
+  }
+  const touch = (iso) => {
+    const k = dayKey(iso, timeZone);
+    return byDate.get(k) || null;
+  };
+  const inRange = (iso) => !!touch(iso);
+
+  for (const s of db.sessions || []) {
+    const createdRow = touch(s.createdAt);
+    if (createdRow) {
+      createdRow.sessions += 1;
+      if (s.clientId) createdRow.apiSessions += 1;
+      else createdRow.cdkSessions += 1;
+      if (s.reused) createdRow.reusedSessions += 1;
+      else createdRow.newSessions += 1;
+      if (s.status === 'waiting') createdRow.waiting += 1;
+    }
+    const successAt = s.receivedAt || s.message?.receivedAt || ((s.status === 'received' || s.counted) ? s.updatedAt : '');
+    const successRow = successAt ? touch(successAt) : null;
+    if (successRow && (s.status === 'received' || s.counted)) successRow.success += 1;
+    const finalAt = s.updatedAt || s.deadlineAt || s.createdAt;
+    const finalRow = finalAt ? touch(finalAt) : null;
+    if (finalRow && s.status === 'timeout') finalRow.timeout += 1;
+    if (finalRow && s.status === 'changed') finalRow.changed += 1;
+  }
+
+  for (const a of db.accounts || []) {
+    const row = touch(a.createdAt);
+    if (row) row.accounts += 1;
+  }
+
+  for (const c of db.cdks || []) {
+    const createdRow = touch(c.createdAt);
+    if (createdRow) createdRow.cdkCreated += 1;
+    const usedAt = c.usedAt || c.redeemedAt;
+    const usedRow = usedAt ? touch(usedAt) : null;
+    if (usedRow && ['used', 'redeemed'].includes(String(c.status || ''))) usedRow.cdkUsed += 1;
+  }
+
+  for (const b of db.billingLogs || []) {
+    const row = touch(b.createdAt);
+    if (!row) continue;
+    const amount = Number(b.amount || 0);
+    row.billingNet += amount;
+    if (String(b.type || '') === 'sms_success') row.smsCharged += Math.abs(amount);
+    if (String(b.type || '') === 'recharge') row.recharge += amount;
+  }
+
+  const daily = [...byDate.values()].map(row => ({
+    ...row,
+    smsCharged: Number(row.smsCharged.toFixed(2)),
+    recharge: Number(row.recharge.toFixed(2)),
+    billingNet: Number(row.billingNet.toFixed(2)),
+    successRate: row.sessions ? Number((row.success / row.sessions * 100).toFixed(1)) : 0,
+  }));
+
+  const totals = daily.reduce((acc, row) => {
+    for (const [k, v] of Object.entries(row)) {
+      if (typeof v === 'number') acc[k] = Number(((acc[k] || 0) + v).toFixed(2));
+    }
+    return acc;
+  }, {});
+  totals.successRate = totals.sessions ? Number((totals.success / totals.sessions * 100).toFixed(1)) : 0;
+
+  return {
+    days,
+    timeZone,
+    startDate: start,
+    endDate: today,
+    totals,
+    daily,
+    current: {
+      activeCdks: (db.cdks || []).filter(c => (c.status || 'active') === 'active').length,
+      waitingSessions: (db.sessions || []).filter(s => s.status === 'waiting').length,
+      availableAccounts: (db.accounts || []).filter(a => ['available', 'resending'].includes(String(a.status || ''))).length,
+      clients: (db.clients || []).length,
+    },
+  };
+}
+
 function addSecondsIsoFrom(iso, seconds) {
   return new Date(new Date(iso).getTime() + Number(seconds) * 1000).toISOString();
 }
@@ -449,6 +591,37 @@ function clientIp(req) {
 
 function userAgent(req) {
   return String(req.get('user-agent') || '').slice(0, 240);
+}
+
+function cleanupFrontendPresence() {
+  const cutoff = Date.now() - FRONTEND_PRESENCE_TTL_MS;
+  for (const [id, row] of frontendPresence.entries()) {
+    if (!row?.lastSeen || row.lastSeen < cutoff) frontendPresence.delete(id);
+  }
+}
+
+function frontendPresenceSummary() {
+  cleanupFrontendPresence();
+  return {
+    frontendOnline: frontendPresence.size,
+    ttlSeconds: Math.round(FRONTEND_PRESENCE_TTL_MS / 1000),
+    updatedAt: nowIso(),
+  };
+}
+
+function touchFrontendPresence(req) {
+  cleanupFrontendPresence();
+  const rawId = String(req.body?.visitorId || '').trim();
+  const id = /^[a-zA-Z0-9_-]{12,80}$/.test(rawId)
+    ? rawId
+    : createHash('sha256').update(`${clientIp(req)}|${userAgent(req)}`).digest('hex').slice(0, 32);
+  frontendPresence.set(id, {
+    lastSeen: Date.now(),
+    ip: clientIp(req),
+    userAgent: userAgent(req),
+    path: String(req.body?.path || '').slice(0, 120),
+  });
+  return frontendPresenceSummary();
 }
 
 function audit(db, req, event, data = {}) {
@@ -539,12 +712,14 @@ function countReusablePoolAccounts(db, config) {
   ).length;
 }
 
-function reusableSuccessfulAccounts(db, config) {
+function reusableSuccessfulAccounts(db, config, { ignoreCooldown = false, excludeAccountIds = [] } = {}) {
+  const excluded = new Set(excludeAccountIds.map(String));
   return db.accounts.filter(a =>
+    !excluded.has(String(a.id)) &&
     accountMatchesConfig(a, config) &&
     ['available', 'resend_failed'].includes(String(a.status || 'available')) &&
     !BUSY_ACCOUNT_STATUSES.has(String(a.status || 'available')) &&
-    (!a.resendCooldownUntil || Date.now() > new Date(a.resendCooldownUntil).getTime()) &&
+    (ignoreCooldown || !a.resendCooldownUntil || Date.now() > new Date(a.resendCooldownUntil).getTime()) &&
     Number(a.useCount || 0) > 0 &&
     Number(a.useCount || 0) < accountMaxUses(a, config) &&
     a.orderid
@@ -555,18 +730,37 @@ function isRetryCdk(db, cdkCode) {
   return db.sessions.some(s => String(s.cdk || '').toUpperCase() === cdkCode && ['timeout', 'changed'].includes(String(s.status || '')));
 }
 
-function findReusableAccount(db, config, { cdkCode = '', forceReuse = false } = {}) {
-  if (config.reuseUsedNumbersEnabled === false || String(config.reuseUsedNumbersEnabled).toLowerCase() === 'false') return null;
-  const successfulAccounts = reusableSuccessfulAccounts(db, config);
-  const successfulReuseThreshold = Number(config.successfulReuseThreshold ?? process.env.SUCCESSFUL_REUSE_THRESHOLD ?? 5);
-  const retryFlow = forceReuse || isRetryCdk(db, cdkCode);
+function accountWasSuccessfulForCdk(db, accountId, cdkCode) {
+  if (!cdkCode) return false;
+  return db.sessions.some(s =>
+    String(s.cdk || '').toUpperCase() === cdkCode &&
+    String(s.accountId || '') === String(accountId || '') &&
+    (s.status === 'received' || s.counted)
+  );
+}
 
-  // Retry flows always prefer proven numbers. First-time flows buy fresh numbers
-  // until successful reusable numbers reach the configured threshold.
+function findReusableAccount(db, config, { cdkCode = '', forceReuse = false, excludeAccountIds = [] } = {}) {
+  if (config.reuseUsedNumbersEnabled === false || String(config.reuseUsedNumbersEnabled).toLowerCase() === 'false') return null;
+  const retryFlow = forceReuse || isRetryCdk(db, cdkCode);
+  const successfulAccounts = reusableSuccessfulAccounts(db, config, {
+    // CDK 重试只受“使用已用号码”总开关控制，不受复用阈值/冷却时间影响。
+    // 重发失败的号码会通过 excludeAccountIds 跳过，避免递归时反复选择同一个号码。
+    ignoreCooldown: retryFlow,
+    excludeAccountIds,
+  });
+  const successfulReuseThreshold = Number(config.successfulReuseThreshold ?? process.env.SUCCESSFUL_REUSE_THRESHOLD ?? 5);
+
+  // CDK retry/change-number flows always prefer proven numbers when the global
+  // reuse switch is enabled. First-time flows still buy fresh numbers until the
+  // successful reusable pool reaches the configured threshold.
   if (!retryFlow && successfulAccounts.length < successfulReuseThreshold) return null;
 
   return successfulAccounts
-    .sort((a, b) => Number(b.useCount || 0) - Number(a.useCount || 0) || String(a.createdAt).localeCompare(String(b.createdAt)))[0];
+    .sort((a, b) => {
+      const sameCdkDelta = Number(accountWasSuccessfulForCdk(db, b.id, cdkCode)) - Number(accountWasSuccessfulForCdk(db, a.id, cdkCode));
+      if (sameCdkDelta) return sameCdkDelta;
+      return Number(b.useCount || 0) - Number(a.useCount || 0) || String(a.createdAt).localeCompare(String(b.createdAt));
+    })[0];
 }
 
 function expireStaleWaitingSessions(db, config) {
@@ -602,7 +796,7 @@ function reserveReusableAccountForResend(cdkCode, config, opts = {}) {
     expireStaleWaitingSessions(wdb, config);
     const c = opts.virtualCdk || wdb.cdks.find(x => x.code.toUpperCase() === cdkCode);
     if (!c || (c.status || 'active') !== 'active') throw Object.assign(new Error('CDK 不可用'), { status: 400 });
-    const reusable = findReusableAccount(wdb, config, { cdkCode });
+    const reusable = findReusableAccount(wdb, config, { cdkCode, forceReuse: opts.forceReuse, excludeAccountIds: opts.skipAccountIds || [] });
     if (!reusable) return null;
     const ts = nowIso();
     reusable.status = 'resending';
@@ -804,7 +998,7 @@ async function allocateSession(cdkCode, opts = {}) {
         }
         audit(wdb, null, 'system.resend_failed_cooldown', { accountId: reusable.id, phone: reusable.phone, cooldownSeconds: cooldown, error: e.message, details: e.details || null });
       });
-      return allocateSession(cdkCode);
+      return allocateSession(cdkCode, { ...opts, skipAccountIds: [...(opts.skipAccountIds || []), reusable.id] });
     }
     return transact(wdb => {
       const c = opts.virtualCdk || wdb.cdks.find(x => x.code.toUpperCase() === cdkCode);
@@ -863,6 +1057,9 @@ async function allocateSession(cdkCode, opts = {}) {
 }
 
 app.get('/api/health', (req, res) => res.json({ success: 1, time: nowIso() }));
+app.post('/api/presence/frontend', (req, res) => {
+  res.json({ success: 1, presence: touchFrontendPresence(req) });
+});
 app.get('/admin', (req, res) => res.status(404).send('Not Found'));
 app.get(ADMIN_PATH, (req, res) => {
   const html = fs.readFileSync(path.resolve('private/admin.html'), 'utf8').replaceAll('__ADMIN_PATH__', ADMIN_PATH);
@@ -1021,7 +1218,7 @@ app.post('/api/v1/session/change-number', requireApiClient, async (req, res, nex
       try { await refundIfEligible(snapshot, oldId); } catch {}
     }
     const virtualCdk = { code: `API-${client.id}-${makeId('req')}`, status: 'active' };
-    const allocated = await allocateSession(virtualCdk.code, { virtualCdk, clientId: client.id, externalId: oldSession.externalId || '' });
+    const allocated = await allocateSession(virtualCdk.code, { virtualCdk, clientId: client.id, externalId: oldSession.externalId || '', forceReuse: true });
     auditApi(req, 'api.change_allocated', { oldSessionId: oldId, newSessionId: allocated.session.id, accountId: allocated.account.id, externalId: oldSession.externalId || '', reused: allocated.reused, phone: allocated.account.phone });
     res.json(apiNumberResponse(allocated));
   } catch (e) { auditApi(req, 'api.change_error', { message: e.message, status: e.status || 500, code: e.code || '', sessionId: req.body?.sessionId || '' }); next(e); }
@@ -1181,7 +1378,7 @@ app.post('/api/session/change-number', requireSameOrigin, async (req, res, next)
       try { await refundIfEligible(snapshot, oldId); } catch (e) { audit(readDb(), req, 'system.refund_error', { sessionId: oldId, message: e.message, details: e.details || null }); }
     }
 
-    const allocated = await allocateSession(oldSession.cdk.toUpperCase());
+    const allocated = await allocateSession(oldSession.cdk.toUpperCase(), { forceReuse: true });
     res.json({ success: 1, ...frontendSessionPayload(allocated.session, allocated.account), sessionToken: allocated.sessionToken, config: { timeoutSeconds: readDb().config.timeoutSeconds, changeNumberAfterSeconds: readDb().config.changeNumberAfterSeconds, pollIntervalSeconds: readDb().config.pollIntervalSeconds } });
   } catch (e) { next(e); }
 });
@@ -1212,10 +1409,13 @@ app.get('/api/admin/overview', requireAdmin, async (req, res) => {
   const db = readDb();
   let balance = null;
   try { balance = await getBalance(getRuntimeConfig(db)); } catch (e) { balance = { error: e.message }; }
+  const stats = buildDailyStats(db, { days: req.query.days, timeZone: req.query.tz || STATS_TIMEZONE });
   res.json({
     success: 1,
     config: safeConfig(db.config),
     balance,
+    presence: frontendPresenceSummary(),
+    stats,
     cdks: db.cdks.map(c => publicCdk(c, { admin: true })),
     accounts: db.accounts.map(a => publicAccount(a, { admin: true })),
     sessions: db.sessions.map(s => publicSession(s, db.accounts.find(a => a.id === s.accountId), { admin: true })),
@@ -1224,6 +1424,11 @@ app.get('/api/admin/overview', requireAdmin, async (req, res) => {
     logs: scrubSensitive(db.logs.slice(0, 100)),
     auditLogs: scrubSensitive((db.auditLogs || []).slice(0, 300)),
   });
+});
+
+app.get('/api/admin/stats/daily', requireAdmin, (req, res) => {
+  const db = readDb();
+  res.json({ success: 1, stats: buildDailyStats(db, { days: req.query.days, timeZone: req.query.tz || STATS_TIMEZONE }) });
 });
 
 app.post('/api/admin/config', requireSameOrigin, requireAdmin, (req, res) => {
