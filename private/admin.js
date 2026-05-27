@@ -10,6 +10,10 @@ let presenceHandle = null;
 const pageState = {
   cdks: { page: 1, pageSize: 20 },
   accounts: { page: 1, pageSize: 20 },
+  manualPool: { page: 1, pageSize: 20 },
+  sessions: { page: 1, pageSize: 20 },
+  clients: { page: 1, pageSize: 20 },
+  billing: { page: 1, pageSize: 20 },
   audit: { page: 1, pageSize: 20 },
 };
 const $ = id => document.getElementById(id);
@@ -97,7 +101,7 @@ function render() {
   const c = state.config;
   renderPresence();
   $('balance').textContent = JSON.stringify(state.balance);
-  ['country', 'service', 'pool', 'maxPrice', 'pricingOption', 'maxAccountUses', 'successfulReuseThreshold', 'reuseUsedNumbersEnabled', 'timeoutSeconds', 'changeNumberAfterSeconds', 'pollIntervalSeconds', 'resendCooldownSeconds', 'refundRetrySeconds', 'mockMode', 'mockReceiveAfterChecks', 'purchaseEnabled', 'purchaseUrl', 'purchaseTextZh', 'purchaseTextEn'].forEach(k => { $(k).value = c[k] ?? ''; });
+  ['country', 'service', 'pool', 'maxPrice', 'pricingOption', 'maxAccountUses', 'successfulReuseThreshold', 'reuseUsedNumbersEnabled', 'numberPoolPriority', 'numberCooldownSeconds', 'timeoutSeconds', 'changeNumberAfterSeconds', 'pollIntervalSeconds', 'resendCooldownSeconds', 'refundRetrySeconds', 'mockMode', 'mockReceiveAfterChecks', 'purchaseEnabled', 'purchaseUrl', 'purchaseTextZh', 'purchaseTextEn'].forEach(k => { $(k).value = c[k] ?? ''; });
   $('apiKey').value = '';
   renderCountryOptions();
   renderStats();
@@ -108,12 +112,13 @@ function render() {
   const accountStatus = $('accountStatusFilter')?.value || '';
   const accounts = accountStatus ? state.accounts.filter(x => String(x.status || '') === accountStatus) : state.accounts;
   renderPagedTable('accounts', accounts || [], 'accountRows', x => `<tr><td>${escapeHtml(x.phone || '-')}</td><td>${x.useCount}/${x.maxUses}</td><td>${escapeHtml(x.status)}${x.source ? `<div class="muted audit-event">${escapeHtml(x.source)}</div>` : ''}</td><td>${escapeHtml(x.orderid)}</td><td>${escapeHtml(x.updatedAt || '')}</td></tr>`);
-  $('sessionRows').innerHTML = state.sessions.map(x => `<tr><td>${escapeHtml(x.id)}</td><td>${escapeHtml(x.phone || '-')}</td><td>${escapeHtml(x.status)}</td><td>${x.message ? escapeHtml(x.message.text || JSON.stringify(x.message.raw)) : ''}</td><td>${escapeHtml(x.deadlineAt || '')}</td></tr>`).join('');
-  $('clientRows').innerHTML = (state.clients || []).map(c => `<tr><td>${escapeHtml(c.name)}</td><td>${escapeHtml(c.apiKeyPrefix || '')}</td><td>${c.balance}</td><td>${c.pricePerSuccess}</td><td>${escapeHtml(c.status)}</td><td><button class="secondary" data-recharge="${escapeHtml(c.id)}">充值</button> <button class="secondary" data-reset-key="${escapeHtml(c.id)}">重置Key</button> <button class="danger" data-toggle-client="${escapeHtml(c.id)}" data-status="${escapeHtml(c.status)}">${c.status === 'active' ? '禁用' : '启用'}</button></td></tr>`).join('');
+  renderManualPool();
+  renderPagedTable('sessions', state.sessions || [], 'sessionRows', x => `<tr><td>${escapeHtml(x.id)}</td><td>${escapeHtml(x.phone || '-')}</td><td>${escapeHtml(x.status)}</td><td>${x.message ? escapeHtml(x.message.text || JSON.stringify(x.message.raw)) : ''}</td><td>${escapeHtml(x.deadlineAt || '')}</td></tr>`);
+  renderPagedTable('clients', state.clients || [], 'clientRows', c => `<tr><td>${escapeHtml(c.name)}</td><td>${escapeHtml(c.apiKeyPrefix || '')}</td><td>${c.balance}</td><td>${c.pricePerSuccess}</td><td>${escapeHtml(c.status)}</td><td><button class="secondary" data-recharge="${escapeHtml(c.id)}">充值</button> <button class="secondary" data-reset-key="${escapeHtml(c.id)}">重置Key</button> <button class="danger" data-toggle-client="${escapeHtml(c.id)}" data-status="${escapeHtml(c.status)}">${c.status === 'active' ? '禁用' : '启用'}</button></td></tr>`);
   document.querySelectorAll('[data-recharge]').forEach(b => b.onclick = () => rechargeClient(b.dataset.recharge));
   document.querySelectorAll('[data-reset-key]').forEach(b => b.onclick = () => resetClientKey(b.dataset.resetKey));
   document.querySelectorAll('[data-toggle-client]').forEach(b => b.onclick = () => toggleClient(b.dataset.toggleClient, b.dataset.status));
-  $('billingRows').innerHTML = (state.billingLogs || []).map(x => `<tr><td>${escapeHtml(x.createdAt || '')}</td><td>${escapeHtml(x.clientId || '')}</td><td>${escapeHtml(x.type || '')}</td><td>${escapeHtml(x.amount || '')}</td><td>${escapeHtml((x.balanceBefore ?? '') + ' → ' + (x.balanceAfter ?? ''))}</td><td>${escapeHtml(x.sessionId || '')}</td></tr>`).join('');
+  renderPagedTable('billing', state.billingLogs || [], 'billingRows', x => `<tr><td>${escapeHtml(x.createdAt || '')}</td><td>${escapeHtml(x.clientId || '')}</td><td>${escapeHtml(x.type || '')}</td><td>${escapeHtml(x.amount || '')}</td><td>${escapeHtml((x.balanceBefore ?? '') + ' → ' + (x.balanceAfter ?? ''))}</td><td>${escapeHtml(x.sessionId || '')}</td></tr>`);
   renderPagedTable('audit', state.auditLogs || [], 'auditRows', (x, idx) => renderAuditRow(x, idx));
   document.querySelectorAll('[data-audit-detail]').forEach(b => b.onclick = () => toggleAuditDetail(b.dataset.auditDetail));
 }
@@ -325,6 +330,32 @@ async function loadStats() {
   } catch (e) { toast(e.message, true); }
 }
 
+function isManualPoolAccountRow(x) {
+  return ['manual', 'manual_pool', 'sms789'].includes(String(x.source || '').toLowerCase());
+}
+
+function cooldownText(until) {
+  if (!until) return '-';
+  const ms = new Date(until).getTime() - Date.now();
+  return ms > 0 ? `${Math.ceil(ms / 1000)}s` : '已结束';
+}
+
+function renderManualPool() {
+  if (!$('manualPoolRows') || !state) return;
+  const q = String($('manualPoolSearch')?.value || '').trim().toLowerCase();
+  const rows = (state.accounts || []).filter(isManualPoolAccountRow).filter(x => !q || [x.phone, x.status, x.source, x.orderid].some(v => String(v || '').toLowerCase().includes(q)));
+  renderPagedTable('manualPool', rows, 'manualPoolRows', x => {
+    const disabled = String(x.status || '') === 'disabled';
+    const canDisable = !disabled && String(x.status || '') !== 'waiting';
+    const action = disabled
+      ? `<button class="secondary" data-manual-enable="${escapeHtml(x.id)}">恢复</button>`
+      : `<button class="danger" data-manual-disable="${escapeHtml(x.id)}" ${canDisable ? '' : 'disabled'}>禁用</button>`;
+    return `<tr><td>${escapeHtml(x.phone || '-')}</td><td>${Number(x.useCount || 0)}/${Number(x.maxUses || 3)}</td><td>${escapeHtml(x.status || '')}</td><td>${escapeHtml(cooldownText(x.resendCooldownUntil))}</td><td>${escapeHtml(x.lastMessageAt || '')}</td><td>${escapeHtml(x.updatedAt || '')}</td><td>${action}</td></tr>`;
+  });
+  document.querySelectorAll('[data-manual-disable]').forEach(b => b.onclick = () => setManualPoolStatus(b.dataset.manualDisable, 'disable'));
+  document.querySelectorAll('[data-manual-enable]').forEach(b => b.onclick = () => setManualPoolStatus(b.dataset.manualEnable, 'enable'));
+}
+
 function renderAccountFilter() {
   const sel = $('accountStatusFilter');
   if (!sel || !state) return;
@@ -338,7 +369,7 @@ function escapeHtml(s) { return String(s).replace(/[&<>"]/g, m => ({ '&': '&amp;
 
 function currentConfigFormBody() {
   const body = {};
-  ['apiKey', 'country', 'service', 'pool', 'maxPrice', 'pricingOption', 'maxAccountUses', 'successfulReuseThreshold', 'reuseUsedNumbersEnabled', 'timeoutSeconds', 'changeNumberAfterSeconds', 'pollIntervalSeconds', 'resendCooldownSeconds', 'refundRetrySeconds', 'mockMode', 'mockReceiveAfterChecks', 'purchaseEnabled', 'purchaseUrl', 'purchaseTextZh', 'purchaseTextEn'].forEach(k => {
+  ['apiKey', 'country', 'service', 'pool', 'maxPrice', 'pricingOption', 'maxAccountUses', 'successfulReuseThreshold', 'reuseUsedNumbersEnabled', 'numberPoolPriority', 'numberCooldownSeconds', 'timeoutSeconds', 'changeNumberAfterSeconds', 'pollIntervalSeconds', 'resendCooldownSeconds', 'refundRetrySeconds', 'mockMode', 'mockReceiveAfterChecks', 'purchaseEnabled', 'purchaseUrl', 'purchaseTextZh', 'purchaseTextEn'].forEach(k => {
     if (k === 'apiKey' && !$(k).value) return;
     body[k] = k === 'country' ? normalizeCountryValue($(k).value) : $(k).value;
   });
@@ -387,6 +418,15 @@ async function testPurchase() {
   } finally {
     btn.disabled = false;
   }
+}
+
+async function setManualPoolStatus(id, action) {
+  try {
+    if (action === 'disable' && !confirm('确定禁用这个自有号码？使用中的号码不能禁用。')) return;
+    await req(`/api/admin/manual-pool/${encodeURIComponent(id)}/status`, { method: 'POST', body: JSON.stringify({ action }) });
+    toast(action === 'disable' ? '已禁用' : '已恢复');
+    await load({ silent: true });
+  } catch (e) { toast(e.message, true); }
 }
 
 async function importManualPool() {
@@ -464,6 +504,8 @@ $('refreshBtn').onclick = refreshData;
 $('saveConfig').onclick = saveConfig;
 $('testPurchase').onclick = testPurchase;
 $('importManualPool').onclick = importManualPool;
+$('refreshManualPool').onclick = refreshData;
+$('manualPoolSearch').addEventListener('input', () => { pageState.manualPool.page = 1; renderManualPool(); });
 $('createCdk').onclick = createCdk;
 $('redeemCdkBtn').onclick = () => redeemCdks();
 $('queryCdkUsage').onclick = () => queryCdkUsage();

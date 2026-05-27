@@ -26,6 +26,8 @@ export const DEFAULT_CONFIG = {
   purchaseTextZh: process.env.PURCHASE_TEXT_ZH || '购买',
   purchaseTextEn: process.env.PURCHASE_TEXT_EN || 'Buy',
   resendCooldownSeconds: Number(process.env.RESEND_COOLDOWN_SECONDS || 300),
+  numberCooldownSeconds: Number(process.env.NUMBER_COOLDOWN_SECONDS || 30),
+  numberPoolPriority: process.env.NUMBER_POOL_PRIORITY || 'manual_first',
   refundRetrySeconds: Number(process.env.REFUND_RETRY_SECONDS || 600),
   successfulReuseThreshold: Number(process.env.SUCCESSFUL_REUSE_THRESHOLD || 5),
   reuseUsedNumbersEnabled: String(process.env.REUSE_USED_NUMBERS_ENABLED || 'true').toLowerCase() !== 'false',
@@ -50,6 +52,8 @@ function normalizeDb(db) {
   if (process.env.TIMEOUT_SECONDS) db.config.timeoutSeconds = Number(process.env.TIMEOUT_SECONDS);
   if (process.env.CHANGE_NUMBER_AFTER_SECONDS) db.config.changeNumberAfterSeconds = Number(process.env.CHANGE_NUMBER_AFTER_SECONDS);
   if (process.env.REFUND_RETRY_SECONDS) db.config.refundRetrySeconds = Number(process.env.REFUND_RETRY_SECONDS);
+  if (process.env.NUMBER_COOLDOWN_SECONDS) db.config.numberCooldownSeconds = Number(process.env.NUMBER_COOLDOWN_SECONDS);
+  if (process.env.NUMBER_POOL_PRIORITY) db.config.numberPoolPriority = String(process.env.NUMBER_POOL_PRIORITY);
   if (process.env.SUCCESSFUL_REUSE_THRESHOLD) db.config.successfulReuseThreshold = Number(process.env.SUCCESSFUL_REUSE_THRESHOLD);
   if (process.env.REUSE_USED_NUMBERS_ENABLED) db.config.reuseUsedNumbersEnabled = String(process.env.REUSE_USED_NUMBERS_ENABLED).toLowerCase() !== 'false';
   db.cdks ||= [];

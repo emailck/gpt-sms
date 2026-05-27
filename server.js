@@ -409,6 +409,7 @@ function publicAccount(account, { admin = false, revealPhone = false } = {}) {
     maxUses: admin ? Number(account.maxUses || 3) : undefined,
     status: account.status,
     source: admin ? (account.source || 'new') : undefined,
+    smsUrl: admin ? (account.smsUrl || '') : undefined,
     resendCooldownUntil: admin ? (account.resendCooldownUntil || null) : undefined,
     resendError: admin ? (account.resendError || null) : undefined,
     lastMessageAt: account.lastMessageAt || null,
@@ -746,12 +747,21 @@ function accountMaxUses(account, config) {
   return Number(account?.maxUses || config.maxAccountUses || 3);
 }
 
-function cooldownReusedAccount(account, config) {
+function numberCooldownSeconds(config) {
+  return Number(config?.numberCooldownSeconds || process.env.NUMBER_COOLDOWN_SECONDS || 30);
+}
+
+function cooldownAccount(account, config, seconds = numberCooldownSeconds(config)) {
   if (!account) return;
   account.status = Number(account.useCount || 0) >= accountMaxUses(account, config) ? 'used_up' : 'available';
-  account.resendCooldownUntil = addSecondsIso(config.resendCooldownSeconds || 300);
+  account.resendCooldownUntil = addSecondsIso(seconds);
   account.updatedAt = nowIso();
   delete account.resendError;
+  delete account.resendingAt;
+}
+
+function cooldownReusedAccount(account, config) {
+  cooldownAccount(account, config, numberCooldownSeconds(config));
 }
 
 function accountMatchesConfig(account, config) {
@@ -881,8 +891,7 @@ function expireStaleWaitingSessions(db, config) {
     }
     if (account) {
       if (isManualPoolAccount(account) && Number(account.useCount || 0) < accountMaxUses(account, config)) {
-        account.status = 'available';
-        account.updatedAt = nowIso();
+        cooldownAccount(account, config);
       } else if (Number(account.useCount || 0) === 0 && !session.reused) {
         account.status = 'failed';
       } else if (session.reused || Number(account.useCount || 0) > 0) {
@@ -966,6 +975,7 @@ function findManualPoolAccount(db, config, { excludeAccountIds = [] } = {}) {
   const candidates = (db.accounts || [])
     .filter(a => !excluded.has(String(a.id)) && manualPoolMatchesConfig(a, config))
     .filter(a => ['available', 'resend_failed'].includes(String(a.status || 'available')))
+    .filter(a => !a.resendCooldownUntil || Date.now() > new Date(a.resendCooldownUntil).getTime())
     .filter(a => Number(a.useCount || 0) < accountMaxUses(a, config))
     .map(account => ({ account, lastUseTime: accountLastSuccessfulUseTime(db, account) }))
     .sort((a, b) => a.lastUseTime - b.lastUseTime || String(a.account.createdAt || '').localeCompare(String(b.account.createdAt || '')));
@@ -1128,10 +1138,21 @@ async function allocateSession(cdkCode, opts = {}) {
   if (!['active'].includes(cdk.status || 'active')) throw Object.assign(new Error('CDK 不可用'), { status: 400 });
   if (!config.mockMode && !config.apiKey) throw Object.assign(new Error('服务暂时不可用，请稍后再试'), { status: 503, publicMessage: true });
 
-  const manualPoolAccount = opts.skipManualPool ? null : reserveManualPoolAccount(cdkCode, config, opts);
-  if (manualPoolAccount) return manualPoolAccount;
+  const priority = String(config.numberPoolPriority || 'manual_first');
+  const poolOrder = priority === 'sms_first' ? ['sms', 'manual'] : (priority === 'manual_only' ? ['manual'] : (priority === 'sms_only' ? ['sms'] : ['manual', 'sms']));
+  let manualPoolAccount = null;
+  let reusable = null;
+  for (const poolType of poolOrder) {
+    if (poolType === 'manual' && !opts.skipManualPool) {
+      manualPoolAccount = reserveManualPoolAccount(cdkCode, config, opts);
+      if (manualPoolAccount) return manualPoolAccount;
+    }
+    if (poolType === 'sms' && !opts.skipReusable) {
+      reusable = reserveReusableAccountForResend(cdkCode, config, opts);
+      if (reusable) break;
+    }
+  }
 
-  const reusable = opts.skipReusable ? null : reserveReusableAccountForResend(cdkCode, config, opts);
   if (reusable) {
     try {
       if (!isManualPoolAccount(reusable)) await resendSms(config, reusable.orderid);
@@ -1288,7 +1309,7 @@ app.post('/api/v1/session/check', requireApiClient, async (req, res, next) => {
         const s = wdb.sessions.find(x => x.id === sessionId);
         const a = wdb.accounts.find(x => x.id === account.id);
         if (s) { s.status = 'timeout'; s.updatedAt = nowIso(); }
-        if (a && isManualPoolAccount(a) && Number(a.useCount || 0) < accountMaxUses(a, wdb.config)) { a.status = 'available'; a.updatedAt = nowIso(); }
+        if (a && isManualPoolAccount(a) && Number(a.useCount || 0) < accountMaxUses(a, wdb.config)) { cooldownAccount(a, wdb.config); }
         else if (a && Number(a.useCount || 0) === 0 && !session.reused) { a.status = 'failed'; a.updatedAt = nowIso(); }
         else if (a && session.reused) { cooldownReusedAccount(a, wdb.config); }
         audit(wdb, req, 'api.session_timeout', { clientId: req.apiClient.id, sessionId, accountId: account.id, phone: account.phone });
@@ -1331,7 +1352,7 @@ app.post('/api/v1/session/check', requireApiClient, async (req, res, next) => {
         a.useCount = Number(a.useCount || 0) + 1;
         a.lastMessage = msg;
         a.lastMessageAt = msg.receivedAt;
-        a.status = a.useCount >= Number(a.maxUses || wdb.config.maxAccountUses || 3) ? 'used_up' : 'available';
+        cooldownAccount(a, wdb.config);
         chargeClientForSession(wdb, s, a);
         wdb.logs.unshift({ id: makeId('log'), type: 'api_received', sessionId: s.id, accountId: a.id, clientId: req.apiClient.id, createdAt: nowIso() });
         audit(wdb, req, 'api.sms_received', { clientId: req.apiClient.id, sessionId: s.id, accountId: a.id, phone: a.phone });
@@ -1367,7 +1388,7 @@ app.post('/api/v1/session/change-number', requireApiClient, async (req, res, nex
       const s = db.sessions.find(x => x.id === oldId);
       const a = oldAccount ? db.accounts.find(x => x.id === oldAccount.id) : null;
       if (s) { s.status = 'changed'; s.updatedAt = nowIso(); }
-      if (a && isManualPoolAccount(a) && Number(a.useCount || 0) < accountMaxUses(a, db.config)) { a.status = 'available'; a.updatedAt = nowIso(); }
+      if (a && isManualPoolAccount(a) && Number(a.useCount || 0) < accountMaxUses(a, db.config)) { cooldownAccount(a, db.config); }
       else if (a && Number(a.useCount || 0) === 0 && !s.reused) { a.status = 'failed'; a.updatedAt = nowIso(); }
       else if (a && s?.reused) { cooldownReusedAccount(a, db.config); }
       audit(db, req, 'api.change_number', { clientId: client.id, sessionId: oldId, accountId: oldAccount?.id, phone: oldAccount?.phone });
@@ -1447,7 +1468,7 @@ app.post('/api/session/check', requireSameOrigin, async (req, res, next) => {
         const c = s && !s.clientId ? wdb.cdks.find(x => x.code.toUpperCase() === s.cdk.toUpperCase()) : null;
         if (s) { s.status = 'timeout'; s.updatedAt = nowIso(); }
         if (c && c.status === 'reserved' && c.reservedSessionId === sessionId) { c.status = 'active'; c.reservedSessionId = null; c.reservedAt = null; }
-        if (a && isManualPoolAccount(a) && Number(a.useCount || 0) < accountMaxUses(a, wdb.config)) { a.status = 'available'; a.updatedAt = nowIso(); }
+        if (a && isManualPoolAccount(a) && Number(a.useCount || 0) < accountMaxUses(a, wdb.config)) { cooldownAccount(a, wdb.config); }
         else if (a && Number(a.useCount || 0) === 0 && !session.reused) { a.status = 'failed'; a.updatedAt = nowIso(); }
         else if (a && session.reused) { cooldownReusedAccount(a, wdb.config); }
         audit(wdb, req, 'user.session_timeout', { sessionId, accountId: account.id, phone: account.phone });
@@ -1488,7 +1509,7 @@ app.post('/api/session/check', requireSameOrigin, async (req, res, next) => {
         a.useCount = Number(a.useCount || 0) + 1;
         a.lastMessage = msg;
         a.lastMessageAt = msg.receivedAt;
-        a.status = a.useCount >= Number(a.maxUses || wdb.config.maxAccountUses || 3) ? 'used_up' : 'available';
+        cooldownAccount(a, wdb.config);
         if (c) { c.status = 'used'; c.usedAt = msg.receivedAt; c.usedSessionId = s.id; c.consumedReason = 'sms_received'; }
         chargeClientForSession(wdb, s, a);
         wdb.logs.unshift({ id: makeId('log'), type: 'received', sessionId: s.id, accountId: a.id, createdAt: nowIso() });
@@ -1527,7 +1548,7 @@ app.post('/api/session/change-number', requireSameOrigin, async (req, res, next)
       if (s) { s.status = 'changed'; s.updatedAt = nowIso(); }
       const c = oldSession.clientId ? null : db.cdks.find(x => x.code.toUpperCase() === oldSession.cdk.toUpperCase());
       if (c && c.status === 'reserved' && c.reservedSessionId === oldId) { c.status = 'active'; c.reservedSessionId = null; c.reservedAt = null; }
-      if (a && isManualPoolAccount(a) && Number(a.useCount || 0) < accountMaxUses(a, db.config)) { a.status = 'available'; a.updatedAt = nowIso(); }
+      if (a && isManualPoolAccount(a) && Number(a.useCount || 0) < accountMaxUses(a, db.config)) { cooldownAccount(a, db.config); }
       else if (a && Number(a.useCount || 0) === 0 && !s.reused) { a.status = 'failed'; a.updatedAt = nowIso(); }
       else if (a && s?.reused) { cooldownReusedAccount(a, db.config); }
       db.logs.unshift({ id: makeId('log'), type: 'change_number', sessionId: oldId, accountId: oldAccount?.id, createdAt: nowIso() });
@@ -1589,6 +1610,25 @@ app.get('/api/admin/overview', requireAdmin, async (req, res) => {
 app.get('/api/admin/stats/daily', requireAdmin, (req, res) => {
   const db = readDb();
   res.json({ success: 1, stats: buildDailyStats(db, { days: req.query.days, timeZone: req.query.tz || STATS_TIMEZONE }) });
+});
+
+app.post('/api/admin/manual-pool/:id/status', requireSameOrigin, requireAdmin, (req, res) => {
+  const id = String(req.params.id || '');
+  const action = String(req.body.action || '').toLowerCase();
+  if (!['disable', 'enable'].includes(action)) return res.status(400).json({ success: 0, message: '操作无效' });
+  const account = transact(db => {
+    const row = (db.accounts || []).find(a => a.id === id && isManualPoolAccount(a));
+    if (!row) return null;
+    if (action === 'disable') row.status = 'disabled';
+    else if (Number(row.useCount || 0) >= accountMaxUses(row, db.config)) row.status = 'used_up';
+    else row.status = 'available';
+    if (action === 'enable') { row.resendCooldownUntil = null; delete row.resendError; }
+    row.updatedAt = nowIso();
+    audit(db, req, action === 'disable' ? 'admin.manual_pool_disable' : 'admin.manual_pool_enable', { accountId: row.id, phone: row.phone });
+    return publicAccount(row, { admin: true });
+  });
+  if (!account) return res.status(404).json({ success: 0, message: '自有号码不存在' });
+  res.json({ success: 1, account });
 });
 
 app.post('/api/admin/manual-pool', requireSameOrigin, requireAdmin, (req, res) => {
@@ -1657,11 +1697,11 @@ app.post('/api/admin/test-purchase', requireSameOrigin, requireAdmin, async (req
 });
 
 app.post('/api/admin/config', requireSameOrigin, requireAdmin, (req, res) => {
-  const allowed = ['apiKey', 'country', 'service', 'pool', 'maxPrice', 'pricingOption', 'maxAccountUses', 'timeoutSeconds', 'changeNumberAfterSeconds', 'pollIntervalSeconds', 'mockMode', 'mockReceiveAfterChecks', 'purchaseEnabled', 'purchaseUrl', 'purchaseTextZh', 'purchaseTextEn', 'resendCooldownSeconds', 'refundRetrySeconds', 'successfulReuseThreshold', 'reuseUsedNumbersEnabled'];
+  const allowed = ['apiKey', 'country', 'service', 'pool', 'maxPrice', 'pricingOption', 'maxAccountUses', 'timeoutSeconds', 'changeNumberAfterSeconds', 'pollIntervalSeconds', 'mockMode', 'mockReceiveAfterChecks', 'purchaseEnabled', 'purchaseUrl', 'purchaseTextZh', 'purchaseTextEn', 'resendCooldownSeconds', 'numberCooldownSeconds', 'numberPoolPriority', 'refundRetrySeconds', 'successfulReuseThreshold', 'reuseUsedNumbersEnabled'];
   const updated = transact(db => {
     for (const k of allowed) {
       if (req.body[k] !== undefined) {
-        if (['maxAccountUses', 'timeoutSeconds', 'changeNumberAfterSeconds', 'pollIntervalSeconds', 'mockReceiveAfterChecks', 'resendCooldownSeconds', 'refundRetrySeconds', 'successfulReuseThreshold'].includes(k)) db.config[k] = Number(req.body[k]);
+        if (['maxAccountUses', 'timeoutSeconds', 'changeNumberAfterSeconds', 'pollIntervalSeconds', 'mockReceiveAfterChecks', 'resendCooldownSeconds', 'numberCooldownSeconds', 'refundRetrySeconds', 'successfulReuseThreshold'].includes(k)) db.config[k] = Number(req.body[k]);
         else if (k === 'mockMode' || k === 'purchaseEnabled' || k === 'reuseUsedNumbersEnabled') db.config[k] = req.body[k] === true || req.body[k] === 'true' || req.body[k] === '1' || req.body[k] === 'on';
         else if (k === 'apiKey' && String(req.body[k]) === '********') continue;
         else if (k === 'apiKey') db.config[k] = storeApiKey(String(req.body[k] ?? ''));
