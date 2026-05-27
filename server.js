@@ -342,13 +342,58 @@ function maskCdk(code = '') {
 }
 
 function publicCdk(cdk, { admin = false } = {}) {
-  return {
+  const row = {
     code: admin ? cdk.code : maskCdk(cdk.code),
     status: cdk.status || 'active',
     createdAt: cdk.createdAt,
     usedAt: cdk.usedAt || null,
     usedSessionId: admin ? (cdk.usedSessionId || null) : null,
     note: cdk.note || '',
+  };
+  if (admin) {
+    row.reservedAt = cdk.reservedAt || null;
+    row.reservedSessionId = cdk.reservedSessionId || null;
+    row.redeemedAt = cdk.redeemedAt || null;
+    row.redeemedReason = cdk.redeemedReason || null;
+    row.consumedReason = cdk.consumedReason || null;
+  }
+  return row;
+}
+
+function buildCdkUsage(db, code) {
+  const normalized = String(code || '').trim().toUpperCase();
+  const cdk = (db.cdks || []).find(x => String(x.code || '').toUpperCase() === normalized);
+  if (!cdk) return null;
+  const sessions = (db.sessions || [])
+    .filter(s => String(s.cdk || '').toUpperCase() === normalized)
+    .sort((a, b) => String(b.createdAt || '').localeCompare(String(a.createdAt || '')))
+    .map(s => {
+      const account = (db.accounts || []).find(a => a.id === s.accountId);
+      return {
+        ...publicSession(s, account, { admin: true }),
+        account: account ? publicAccount(account, { admin: true }) : null,
+      };
+    });
+  const successfulSessions = sessions.filter(s => s.status === 'received' || s.counted);
+  const messageSessions = sessions.filter(s => s.message?.text || s.message?.raw);
+  const uniquePhones = [...new Set(sessions.map(s => s.phone).filter(Boolean))];
+  return {
+    cdk: publicCdk(cdk, { admin: true }),
+    summary: {
+      totalSessions: sessions.length,
+      successfulSessions: successfulSessions.length,
+      waitingSessions: sessions.filter(s => s.status === 'waiting').length,
+      timeoutSessions: sessions.filter(s => s.status === 'timeout').length,
+      changedSessions: sessions.filter(s => s.status === 'changed').length,
+      reusedSessions: sessions.filter(s => s.reused).length,
+      uniquePhones: uniquePhones.length,
+      phones: uniquePhones,
+      firstSessionAt: sessions.length ? sessions[sessions.length - 1].createdAt : null,
+      lastSessionAt: sessions.length ? sessions[0].createdAt : null,
+      lastMessageAt: messageSessions.length ? (messageSessions[0].message?.receivedAt || messageSessions[0].receivedAt || null) : null,
+      isConsumed: ['used', 'redeemed', 'disabled'].includes(String(cdk.status || 'active')),
+    },
+    sessions,
   };
 }
 
@@ -661,10 +706,24 @@ function extractMessage(data) {
   if (status && [0, 1, 2, 4, 5, 6, 7, 8, 9].includes(status) && systemLike.test(genericMessage)) return null;
   if (systemLike.test(genericMessage) && !data.sms && !data.full_sms && !data.code && !data.pin && !data.otp) return null;
 
-  const candidates = [data.sms, data.full_sms, data.code, data.pin, data.otp, data.text];
+  const candidates = [
+    data.sms, data.full_sms, data.text, data.content,
+    data.fields?.content, data.data?.sms, data.data?.full_sms, data.data?.text, data.data?.content, data.data?.fields?.content,
+    data.pin, data.otp, data.data?.pin, data.data?.otp,
+  ];
   for (const item of candidates) {
     if (item === undefined || item === null || item === '') continue;
     const text = typeof item === 'string' ? item : JSON.stringify(item);
+    if (systemLike.test(text)) continue;
+    return { raw: data, text, receivedAt: nowIso() };
+  }
+
+  const codeCandidates = [data.code, data.data?.code];
+  for (const item of codeCandidates) {
+    if (item === undefined || item === null || item === '') continue;
+    const text = String(item);
+    // 避免把 API 状态码 code:0/code:1 误判为短信验证码。
+    if (!/^\d{4,8}$/.test(text)) continue;
     if (systemLike.test(text)) continue;
     return { raw: data, text, receivedAt: nowIso() };
   }
@@ -703,8 +762,38 @@ function accountMatchesConfig(account, config) {
     poolMatches(account.pool);
 }
 
+function isManualPoolAccount(account) {
+  return ['manual', 'manual_pool', 'sms789'].includes(String(account?.source || '').toLowerCase());
+}
+
+function manualPoolMatchesConfig(account, config) {
+  return isManualPoolAccount(account) &&
+    String(account.country) === String(config.country) &&
+    String(account.service) === String(config.service);
+}
+
+function parseManualPoolEntries(input) {
+  const rows = String(input || '').split(/\r?\n/).map(x => x.trim()).filter(Boolean);
+  const parsed = [];
+  const errors = [];
+  rows.forEach((line, idx) => {
+    const parts = line.split(/\s*-{2,}\s*/);
+    if (parts.length < 2) { errors.push({ line: idx + 1, message: '格式应为 手机号----短信查询URL' }); return; }
+    const phone = String(parts.shift() || '').trim();
+    const smsUrl = parts.join('----').trim();
+    if (!/^\+?\d{7,20}$/.test(phone)) { errors.push({ line: idx + 1, message: '手机号格式无效' }); return; }
+    try {
+      const u = new URL(smsUrl);
+      if (!['http:', 'https:'].includes(u.protocol)) throw new Error('bad protocol');
+    } catch { errors.push({ line: idx + 1, message: '短信查询URL无效' }); return; }
+    parsed.push({ phone, smsUrl });
+  });
+  return { parsed, errors };
+}
+
 function countReusablePoolAccounts(db, config) {
   return db.accounts.filter(a =>
+    !isManualPoolAccount(a) &&
     accountMatchesConfig(a, config) &&
     a.orderid &&
     !TERMINAL_ACCOUNT_STATUSES.has(String(a.status || 'available')) &&
@@ -716,6 +805,7 @@ function reusableSuccessfulAccounts(db, config, { ignoreCooldown = false, exclud
   const excluded = new Set(excludeAccountIds.map(String));
   return db.accounts.filter(a =>
     !excluded.has(String(a.id)) &&
+    !isManualPoolAccount(a) &&
     accountMatchesConfig(a, config) &&
     ['available', 'resend_failed'].includes(String(a.status || 'available')) &&
     !BUSY_ACCOUNT_STATUSES.has(String(a.status || 'available')) &&
@@ -730,13 +820,20 @@ function isRetryCdk(db, cdkCode) {
   return db.sessions.some(s => String(s.cdk || '').toUpperCase() === cdkCode && ['timeout', 'changed'].includes(String(s.status || '')));
 }
 
-function accountWasSuccessfulForCdk(db, accountId, cdkCode) {
-  if (!cdkCode) return false;
-  return db.sessions.some(s =>
-    String(s.cdk || '').toUpperCase() === cdkCode &&
-    String(s.accountId || '') === String(accountId || '') &&
-    (s.status === 'received' || s.counted)
-  );
+function accountLastSuccessfulUseTime(db, account) {
+  const sessionTimes = (db.sessions || [])
+    .filter(s => String(s.accountId || '') === String(account?.id || '') && (s.status === 'received' || s.counted))
+    .map(s => Date.parse(s.receivedAt || s.message?.receivedAt || s.updatedAt || s.createdAt || ''))
+    .filter(Number.isFinite);
+  const accountTimes = [account?.lastMessageAt, account?.updatedAt, account?.createdAt]
+    .map(x => Date.parse(x || ''))
+    .filter(Number.isFinite);
+  return Math.max(0, ...sessionTimes, ...accountTimes);
+}
+
+function pickRandom(items) {
+  if (!items.length) return null;
+  return items[Math.floor(Math.random() * items.length)];
 }
 
 function findReusableAccount(db, config, { cdkCode = '', forceReuse = false, excludeAccountIds = [] } = {}) {
@@ -755,12 +852,15 @@ function findReusableAccount(db, config, { cdkCode = '', forceReuse = false, exc
   // successful reusable pool reaches the configured threshold.
   if (!retryFlow && successfulAccounts.length < successfulReuseThreshold) return null;
 
-  return successfulAccounts
-    .sort((a, b) => {
-      const sameCdkDelta = Number(accountWasSuccessfulForCdk(db, b.id, cdkCode)) - Number(accountWasSuccessfulForCdk(db, a.id, cdkCode));
-      if (sameCdkDelta) return sameCdkDelta;
-      return Number(b.useCount || 0) - Number(a.useCount || 0) || String(a.createdAt).localeCompare(String(b.createdAt));
-    })[0];
+  // 复用已成功号码时，不再固定选择某一个“最优”号码。
+  // 先按最后成功使用时间从远到近排序，取最久未使用的 3 个，再随机挑 1 个，
+  // 让号码池更均匀轮转，避免少数号码被连续 resend。
+  const oldestCandidates = successfulAccounts
+    .map(account => ({ account, lastUseTime: accountLastSuccessfulUseTime(db, account) }))
+    .sort((a, b) => a.lastUseTime - b.lastUseTime || String(a.account.createdAt || '').localeCompare(String(b.account.createdAt || '')))
+    .slice(0, 3)
+    .map(x => x.account);
+  return pickRandom(oldestCandidates);
 }
 
 function expireStaleWaitingSessions(db, config) {
@@ -780,7 +880,10 @@ function expireStaleWaitingSessions(db, config) {
       cdk.reservedAt = null;
     }
     if (account) {
-      if (Number(account.useCount || 0) === 0 && !session.reused) {
+      if (isManualPoolAccount(account) && Number(account.useCount || 0) < accountMaxUses(account, config)) {
+        account.status = 'available';
+        account.updatedAt = nowIso();
+      } else if (Number(account.useCount || 0) === 0 && !session.reused) {
         account.status = 'failed';
       } else if (session.reused || Number(account.useCount || 0) > 0) {
         cooldownReusedAccount(account, config);
@@ -841,6 +944,56 @@ async function buildPoolCandidates(config) {
   const arr = Array.isArray(raw) ? raw : (Array.isArray(raw?.data) ? raw.data : (Array.isArray(raw?.pools) ? raw.pools : []));
   const ids = [...new Set(arr.map(poolIdOf).filter(Boolean))];
   return ids.length ? ids : [''];
+}
+
+async function checkManualSms(account) {
+  if (!account?.smsUrl) throw Object.assign(new Error('自有号码缺少短信查询URL'), { status: 500 });
+  const res = await fetch(account.smsUrl, { headers: { accept: 'application/json,text/plain,*/*' } });
+  const text = await res.text();
+  let data = text;
+  try { data = text ? JSON.parse(text) : {}; } catch {}
+  if (!res.ok) {
+    const err = new Error(`自有号码查询失败 HTTP ${res.status}`);
+    err.status = 502;
+    err.details = data;
+    throw err;
+  }
+  return typeof data === 'object' && data !== null ? { ...data, provider: account.source || 'manual_pool' } : { success: text ? 1 : 0, sms: text, message: text, provider: account.source || 'manual_pool' };
+}
+
+function findManualPoolAccount(db, config, { excludeAccountIds = [] } = {}) {
+  const excluded = new Set(excludeAccountIds.map(String));
+  const candidates = (db.accounts || [])
+    .filter(a => !excluded.has(String(a.id)) && manualPoolMatchesConfig(a, config))
+    .filter(a => ['available', 'resend_failed'].includes(String(a.status || 'available')))
+    .filter(a => Number(a.useCount || 0) < accountMaxUses(a, config))
+    .map(account => ({ account, lastUseTime: accountLastSuccessfulUseTime(db, account) }))
+    .sort((a, b) => a.lastUseTime - b.lastUseTime || String(a.account.createdAt || '').localeCompare(String(b.account.createdAt || '')));
+  return pickRandom(candidates.slice(0, 3).map(x => x.account));
+}
+
+function reserveManualPoolAccount(cdkCode, config, opts = {}) {
+  return transact(wdb => {
+    expireStaleWaitingSessions(wdb, config);
+    const c = opts.virtualCdk || wdb.cdks.find(x => x.code.toUpperCase() === cdkCode);
+    if (!c || (c.status || 'active') !== 'active') throw Object.assign(new Error('CDK 不可用'), { status: 400 });
+    const account = findManualPoolAccount(wdb, config, { excludeAccountIds: opts.skipAccountIds || [] });
+    if (!account) return null;
+    const ts = nowIso();
+    account.status = 'waiting';
+    account.updatedAt = ts;
+    const sessionToken = randomToken();
+    const session = {
+      id: makeId('sess'), sessionTokenHash: hashToken(sessionToken), sessionTokenEncrypted: encryptSecret(sessionToken), cdk: c.code, accountId: account.id, orderid: account.orderid, phone: account.phone,
+      country: account.country, service: account.service, pool: account.pool || 'manual', status: 'waiting', counted: false,
+      reused: Number(account.useCount || 0) > 0, clientId: opts.clientId || null, externalId: opts.externalId || '', billed: false, source: account.source || 'manual_pool', createdAt: ts, updatedAt: ts, deadlineAt: addSecondsIso(config.timeoutSeconds || 120),
+    };
+    if (!opts.virtualCdk) { c.status = 'reserved'; c.reservedAt = session.createdAt; c.reservedSessionId = session.id; }
+    wdb.sessions.unshift(session);
+    wdb.logs.unshift({ id: makeId('log'), type: 'manual_pool_allocate', sessionId: session.id, accountId: account.id, createdAt: nowIso() });
+    audit(wdb, null, 'system.manual_pool_allocate', { sessionId: session.id, accountId: account.id, phone: account.phone, cdk: maskCdk(c.code) });
+    return { session, sessionToken, account, reused: !!session.reused };
+  });
 }
 
 async function purchaseSmsAuto(config) {
@@ -975,10 +1128,13 @@ async function allocateSession(cdkCode, opts = {}) {
   if (!['active'].includes(cdk.status || 'active')) throw Object.assign(new Error('CDK 不可用'), { status: 400 });
   if (!config.mockMode && !config.apiKey) throw Object.assign(new Error('服务暂时不可用，请稍后再试'), { status: 503, publicMessage: true });
 
+  const manualPoolAccount = opts.skipManualPool ? null : reserveManualPoolAccount(cdkCode, config, opts);
+  if (manualPoolAccount) return manualPoolAccount;
+
   const reusable = opts.skipReusable ? null : reserveReusableAccountForResend(cdkCode, config, opts);
   if (reusable) {
     try {
-      await resendSms(config, reusable.orderid);
+      if (!isManualPoolAccount(reusable)) await resendSms(config, reusable.orderid);
     } catch (e) {
       const cooldown = retryAfterSecondsFromError(e, config.resendCooldownSeconds || 300);
       transact(wdb => {
@@ -1132,11 +1288,12 @@ app.post('/api/v1/session/check', requireApiClient, async (req, res, next) => {
         const s = wdb.sessions.find(x => x.id === sessionId);
         const a = wdb.accounts.find(x => x.id === account.id);
         if (s) { s.status = 'timeout'; s.updatedAt = nowIso(); }
-        if (a && Number(a.useCount || 0) === 0 && !session.reused) { a.status = 'failed'; a.updatedAt = nowIso(); }
+        if (a && isManualPoolAccount(a) && Number(a.useCount || 0) < accountMaxUses(a, wdb.config)) { a.status = 'available'; a.updatedAt = nowIso(); }
+        else if (a && Number(a.useCount || 0) === 0 && !session.reused) { a.status = 'failed'; a.updatedAt = nowIso(); }
         else if (a && session.reused) { cooldownReusedAccount(a, wdb.config); }
         audit(wdb, req, 'api.session_timeout', { clientId: req.apiClient.id, sessionId, accountId: account.id, phone: account.phone });
       });
-      refundIfEligible(readDb(), sessionId).catch(() => {});
+      if (!isManualPoolAccount(account)) refundIfEligible(readDb(), sessionId).catch(() => {});
       const fresh = readDb();
       const s = fresh.sessions.find(x => x.id === sessionId);
       const a = fresh.accounts.find(x => x.id === account.id);
@@ -1146,7 +1303,7 @@ app.post('/api/v1/session/check', requireApiClient, async (req, res, next) => {
 
     let data;
     try {
-      data = await checkSms(getRuntimeConfig(db), account.orderid);
+      data = isManualPoolAccount(account) ? await checkManualSms(account) : await checkSms(getRuntimeConfig(db), account.orderid);
     } catch (e) {
       const fresh = transact(wdb => {
         const s = wdb.sessions.find(x => x.id === sessionId);
@@ -1210,11 +1367,12 @@ app.post('/api/v1/session/change-number', requireApiClient, async (req, res, nex
       const s = db.sessions.find(x => x.id === oldId);
       const a = oldAccount ? db.accounts.find(x => x.id === oldAccount.id) : null;
       if (s) { s.status = 'changed'; s.updatedAt = nowIso(); }
-      if (a && Number(a.useCount || 0) === 0 && !s.reused) { a.status = 'failed'; a.updatedAt = nowIso(); }
+      if (a && isManualPoolAccount(a) && Number(a.useCount || 0) < accountMaxUses(a, db.config)) { a.status = 'available'; a.updatedAt = nowIso(); }
+      else if (a && Number(a.useCount || 0) === 0 && !s.reused) { a.status = 'failed'; a.updatedAt = nowIso(); }
       else if (a && s?.reused) { cooldownReusedAccount(a, db.config); }
       audit(db, req, 'api.change_number', { clientId: client.id, sessionId: oldId, accountId: oldAccount?.id, phone: oldAccount?.phone });
     });
-    if (oldAccount && !oldSession.reused && Number(oldAccount.useCount || 0) === 0) {
+    if (oldAccount && !isManualPoolAccount(oldAccount) && !oldSession.reused && Number(oldAccount.useCount || 0) === 0) {
       try { await refundIfEligible(snapshot, oldId); } catch {}
     }
     const virtualCdk = { code: `API-${client.id}-${makeId('req')}`, status: 'active' };
@@ -1289,17 +1447,18 @@ app.post('/api/session/check', requireSameOrigin, async (req, res, next) => {
         const c = s && !s.clientId ? wdb.cdks.find(x => x.code.toUpperCase() === s.cdk.toUpperCase()) : null;
         if (s) { s.status = 'timeout'; s.updatedAt = nowIso(); }
         if (c && c.status === 'reserved' && c.reservedSessionId === sessionId) { c.status = 'active'; c.reservedSessionId = null; c.reservedAt = null; }
-        if (a && Number(a.useCount || 0) === 0 && !session.reused) { a.status = 'failed'; a.updatedAt = nowIso(); }
+        if (a && isManualPoolAccount(a) && Number(a.useCount || 0) < accountMaxUses(a, wdb.config)) { a.status = 'available'; a.updatedAt = nowIso(); }
+        else if (a && Number(a.useCount || 0) === 0 && !session.reused) { a.status = 'failed'; a.updatedAt = nowIso(); }
         else if (a && session.reused) { cooldownReusedAccount(a, wdb.config); }
         audit(wdb, req, 'user.session_timeout', { sessionId, accountId: account.id, phone: account.phone });
       });
-      refundIfEligible(readDb(), sessionId).catch(() => {});
+      if (!isManualPoolAccount(account)) refundIfEligible(readDb(), sessionId).catch(() => {});
       return res.json({ success: 1, received: false, timedOut: true, ...frontendSessionPayload({ ...session, status: 'timeout' }, account) });
     }
 
     let data;
     try {
-      data = await checkSms(getRuntimeConfig(db), account.orderid);
+      data = isManualPoolAccount(account) ? await checkManualSms(account) : await checkSms(getRuntimeConfig(db), account.orderid);
     } catch (e) {
       const updated = transact(wdb => {
         const s = wdb.sessions.find(x => x.id === sessionId);
@@ -1368,13 +1527,14 @@ app.post('/api/session/change-number', requireSameOrigin, async (req, res, next)
       if (s) { s.status = 'changed'; s.updatedAt = nowIso(); }
       const c = oldSession.clientId ? null : db.cdks.find(x => x.code.toUpperCase() === oldSession.cdk.toUpperCase());
       if (c && c.status === 'reserved' && c.reservedSessionId === oldId) { c.status = 'active'; c.reservedSessionId = null; c.reservedAt = null; }
-      if (a && Number(a.useCount || 0) === 0 && !s.reused) { a.status = 'failed'; a.updatedAt = nowIso(); }
+      if (a && isManualPoolAccount(a) && Number(a.useCount || 0) < accountMaxUses(a, db.config)) { a.status = 'available'; a.updatedAt = nowIso(); }
+      else if (a && Number(a.useCount || 0) === 0 && !s.reused) { a.status = 'failed'; a.updatedAt = nowIso(); }
       else if (a && s?.reused) { cooldownReusedAccount(a, db.config); }
       db.logs.unshift({ id: makeId('log'), type: 'change_number', sessionId: oldId, accountId: oldAccount?.id, createdAt: nowIso() });
       audit(db, req, 'user.change_number', { sessionId: oldId, accountId: oldAccount?.id, phone: oldAccount?.phone });
     });
 
-    if (oldAccount && !oldSession.reused && Number(oldAccount.useCount || 0) === 0) {
+    if (oldAccount && !isManualPoolAccount(oldAccount) && !oldSession.reused && Number(oldAccount.useCount || 0) === 0) {
       try { await refundIfEligible(snapshot, oldId); } catch (e) { audit(readDb(), req, 'system.refund_error', { sessionId: oldId, message: e.message, details: e.details || null }); }
     }
 
@@ -1429,6 +1589,71 @@ app.get('/api/admin/overview', requireAdmin, async (req, res) => {
 app.get('/api/admin/stats/daily', requireAdmin, (req, res) => {
   const db = readDb();
   res.json({ success: 1, stats: buildDailyStats(db, { days: req.query.days, timeZone: req.query.tz || STATS_TIMEZONE }) });
+});
+
+app.post('/api/admin/manual-pool', requireSameOrigin, requireAdmin, (req, res) => {
+  const input = String(req.body.entries || req.body.text || '');
+  const maxUses = Math.min(Math.max(Number(req.body.maxUses || 3), 1), 20);
+  const { parsed, errors } = parseManualPoolEntries(input);
+  if (!parsed.length) return res.status(400).json({ success: 0, message: errors[0]?.message || '请输入自有号码池', errors });
+  const result = transact(db => {
+    const rows = [];
+    let created = 0;
+    let updated = 0;
+    for (const item of parsed) {
+      const existing = (db.accounts || []).find(a => isManualPoolAccount(a) && String(a.phone) === item.phone);
+      if (existing) {
+        existing.smsUrl = item.smsUrl;
+        existing.maxUses = maxUses;
+        existing.country = String(db.config.country);
+        existing.service = String(db.config.service);
+        existing.pool = 'manual';
+        if (['failed', 'refunded', 'refund_pending'].includes(String(existing.status || ''))) existing.status = 'available';
+        existing.updatedAt = nowIso();
+        updated++;
+        rows.push(publicAccount(existing, { admin: true }));
+      } else {
+        const row = {
+          id: makeId('acct'), orderid: `MANUAL-${makeId('ord')}`, phone: item.phone, smsUrl: item.smsUrl,
+          country: String(db.config.country), service: String(db.config.service), pool: 'manual',
+          useCount: 0, maxUses, status: 'available', source: 'manual_pool', upstream: { provider: 'manual_pool' },
+          createdAt: nowIso(), updatedAt: nowIso(), lastMessageAt: null,
+        };
+        db.accounts.unshift(row);
+        created++;
+        rows.push(publicAccount(row, { admin: true }));
+      }
+    }
+    audit(db, req, 'admin.manual_pool_import', { created, updated, errors: errors.length });
+    return { created, updated, errors, rows };
+  });
+  res.json({ success: 1, ...result });
+});
+
+app.post('/api/admin/test-purchase', requireSameOrigin, requireAdmin, async (req, res, next) => {
+  try {
+    const db = readDb();
+    const config = getRuntimeConfig(db);
+    if (!config.mockMode && !config.apiKey) return res.status(400).json({ success: 0, message: '未配置 SMSPool API Key' });
+    const purchaseResult = await purchaseSmsAuto(config);
+    const upstream = purchaseResult.upstream;
+    const orderid = String(extractOrderId(upstream) || '');
+    const phone = String(extractPhone(upstream) || '');
+    transact(wdb => audit(wdb, req, 'admin.test_purchase', { orderid, phone, poolUsed: purchaseResult.poolUsed, triedPools: purchaseResult.triedPools, upstream }));
+    res.json({
+      success: 1,
+      result: {
+        orderid,
+        phone,
+        poolUsed: purchaseResult.poolUsed,
+        triedPools: purchaseResult.triedPools,
+        upstream: scrubSensitive(upstream),
+      },
+    });
+  } catch (e) {
+    transact(db => audit(db, req, 'admin.test_purchase_error', { message: e.message, details: e.details || null }));
+    next(e);
+  }
 });
 
 app.post('/api/admin/config', requireSameOrigin, requireAdmin, (req, res) => {
@@ -1555,6 +1780,15 @@ app.post('/api/admin/cdk/:code/disable', requireSameOrigin, requireAdmin, (req, 
   });
   if (!cdk) return res.status(404).json({ success: 0, message: 'CDK 不存在' });
   res.json({ success: 1, cdk });
+});
+
+app.post('/api/admin/cdks/usage', requireSameOrigin, requireAdmin, (req, res) => {
+  const code = String(req.body.code || '').trim().toUpperCase();
+  if (!code) return res.status(400).json({ success: 0, message: '请输入 CDK' });
+  const usage = buildCdkUsage(readDb(), code);
+  if (!usage) return res.status(404).json({ success: 0, message: 'CDK 不存在' });
+  transact(db => audit(db, req, 'admin.cdk_usage_query', { cdk: maskCdk(code), sessions: usage.summary.totalSessions }));
+  res.json({ success: 1, usage });
 });
 
 app.post('/api/admin/cdks/redeem', requireSameOrigin, requireAdmin, (req, res) => {

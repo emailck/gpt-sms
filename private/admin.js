@@ -101,19 +101,83 @@ function render() {
   $('apiKey').value = '';
   renderCountryOptions();
   renderStats();
-  renderPagedTable('cdks', state.cdks || [], 'cdkRows', x => `<tr><td>${escapeHtml(x.code)}</td><td>${escapeHtml(x.status)}</td><td>${escapeHtml(x.createdAt || '')}</td><td>${escapeHtml(x.usedAt || x.redeemedAt || '')}</td><td>${escapeHtml(x.note || '')}</td><td><button class="secondary" data-redeem="${escapeHtml(x.code)}">核销</button></td></tr>`);
+  renderPagedTable('cdks', state.cdks || [], 'cdkRows', x => `<tr><td>${escapeHtml(x.code)}</td><td>${escapeHtml(x.status)}</td><td>${escapeHtml(x.createdAt || '')}</td><td>${escapeHtml(x.usedAt || x.redeemedAt || '')}</td><td>${escapeHtml(x.note || '')}</td><td><button class="secondary" data-usage="${escapeHtml(x.code)}">使用情况</button> <button class="secondary" data-redeem="${escapeHtml(x.code)}">核销</button></td></tr>`);
+  document.querySelectorAll('[data-usage]').forEach(b => b.onclick = () => queryCdkUsage(b.dataset.usage));
   document.querySelectorAll('[data-redeem]').forEach(b => b.onclick = () => redeemCdks(b.dataset.redeem));
   renderAccountFilter();
   const accountStatus = $('accountStatusFilter')?.value || '';
   const accounts = accountStatus ? state.accounts.filter(x => String(x.status || '') === accountStatus) : state.accounts;
-  renderPagedTable('accounts', accounts || [], 'accountRows', x => `<tr><td>${escapeHtml(x.phone || '-')}</td><td>${x.useCount}/${x.maxUses}</td><td>${escapeHtml(x.status)}</td><td>${escapeHtml(x.orderid)}</td><td>${escapeHtml(x.updatedAt || '')}</td></tr>`);
+  renderPagedTable('accounts', accounts || [], 'accountRows', x => `<tr><td>${escapeHtml(x.phone || '-')}</td><td>${x.useCount}/${x.maxUses}</td><td>${escapeHtml(x.status)}${x.source ? `<div class="muted audit-event">${escapeHtml(x.source)}</div>` : ''}</td><td>${escapeHtml(x.orderid)}</td><td>${escapeHtml(x.updatedAt || '')}</td></tr>`);
   $('sessionRows').innerHTML = state.sessions.map(x => `<tr><td>${escapeHtml(x.id)}</td><td>${escapeHtml(x.phone || '-')}</td><td>${escapeHtml(x.status)}</td><td>${x.message ? escapeHtml(x.message.text || JSON.stringify(x.message.raw)) : ''}</td><td>${escapeHtml(x.deadlineAt || '')}</td></tr>`).join('');
   $('clientRows').innerHTML = (state.clients || []).map(c => `<tr><td>${escapeHtml(c.name)}</td><td>${escapeHtml(c.apiKeyPrefix || '')}</td><td>${c.balance}</td><td>${c.pricePerSuccess}</td><td>${escapeHtml(c.status)}</td><td><button class="secondary" data-recharge="${escapeHtml(c.id)}">充值</button> <button class="secondary" data-reset-key="${escapeHtml(c.id)}">重置Key</button> <button class="danger" data-toggle-client="${escapeHtml(c.id)}" data-status="${escapeHtml(c.status)}">${c.status === 'active' ? '禁用' : '启用'}</button></td></tr>`).join('');
   document.querySelectorAll('[data-recharge]').forEach(b => b.onclick = () => rechargeClient(b.dataset.recharge));
   document.querySelectorAll('[data-reset-key]').forEach(b => b.onclick = () => resetClientKey(b.dataset.resetKey));
   document.querySelectorAll('[data-toggle-client]').forEach(b => b.onclick = () => toggleClient(b.dataset.toggleClient, b.dataset.status));
   $('billingRows').innerHTML = (state.billingLogs || []).map(x => `<tr><td>${escapeHtml(x.createdAt || '')}</td><td>${escapeHtml(x.clientId || '')}</td><td>${escapeHtml(x.type || '')}</td><td>${escapeHtml(x.amount || '')}</td><td>${escapeHtml((x.balanceBefore ?? '') + ' → ' + (x.balanceAfter ?? ''))}</td><td>${escapeHtml(x.sessionId || '')}</td></tr>`).join('');
-  renderPagedTable('audit', state.auditLogs || [], 'auditRows', x => `<tr><td>${escapeHtml(x.createdAt || '')}</td><td>${escapeHtml(x.event || '')}</td><td>${escapeHtml(x.ip || '')}</td><td>${escapeHtml(x.userAgent || '')}</td><td><code>${escapeHtml(JSON.stringify(x.data || {}))}</code></td></tr>`);
+  renderPagedTable('audit', state.auditLogs || [], 'auditRows', (x, idx) => renderAuditRow(x, idx));
+  document.querySelectorAll('[data-audit-detail]').forEach(b => b.onclick = () => toggleAuditDetail(b.dataset.auditDetail));
+}
+
+function auditEventTitle(event) {
+  const map = {
+    'admin.login_success': '管理员登录成功',
+    'admin.login_failed': '管理员登录失败',
+    'admin.logout': '管理员退出登录',
+    'admin.config_update': '更新系统配置',
+    'admin.cdk_create': '生成 CDK',
+    'admin.cdk_redeem': '管理员核销 CDK',
+    'admin.cdk_disable': '禁用 CDK',
+    'admin.cdk_usage_query': '查询 CDK 使用情况',
+    'user.cdk_redeem_attempt': '用户尝试兑换 CDK',
+    'user.cdk_redeemed': '用户获取号码',
+    'user.cdk_records_query': '用户查询 CDK 记录',
+    'user.sms_received': '成功收到短信',
+    'user.session_timeout': '接码会话超时',
+    'user.change_number': '用户更换号码',
+    'api.sms_received': 'API 客户成功收到短信',
+    'api.session_timeout': 'API 会话超时',
+    'api.change_number': 'API 客户更换号码',
+    'security.bad_origin': '拦截异常来源请求',
+  };
+  return map[event] || event || '日志事件';
+}
+
+function compactId(value) {
+  const s = String(value || '');
+  if (!s) return '';
+  if (s.startsWith('sess_')) return `会话 ${s.slice(0, 13)}…`;
+  if (s.startsWith('acct_')) return `号码账号 ${s.slice(0, 13)}…`;
+  if (s.startsWith('client_')) return `客户 ${s.slice(0, 15)}…`;
+  return s.length > 24 ? `${s.slice(0, 12)}…${s.slice(-6)}` : s;
+}
+
+function describeAuditLog(log) {
+  const d = log.data || {};
+  const parts = [];
+  if (d.cdk) parts.push(`CDK ${d.cdk}`);
+  if (d.sessionId) parts.push(compactId(d.sessionId));
+  if (d.accountId) parts.push(compactId(d.accountId));
+  if (d.clientId) parts.push(compactId(d.clientId));
+  if (d.phone) parts.push(`号码 ${d.phone}`);
+  if (d.reused !== undefined) parts.push(d.reused ? '复用号码' : '新号码');
+  if (d.count !== undefined) parts.push(`数量 ${d.count}`);
+  if (d.sessions !== undefined) parts.push(`会话 ${d.sessions} 条`);
+  if (d.requested !== undefined) parts.push(`请求 ${d.requested} 个`);
+  if (d.redeemed !== undefined) parts.push(`核销 ${d.redeemed} 个`);
+  if (d.message && !parts.length) parts.push(String(d.message));
+  return parts.length ? parts.join('，') : '点击查看具体字段';
+}
+
+function renderAuditRow(x, idx) {
+  const id = `auditDetail_${pageState.audit.page}_${idx}`;
+  const detail = escapeHtml(JSON.stringify(x.data || {}, null, 2));
+  return `<tr><td>${escapeHtml(x.createdAt || '')}</td><td>${escapeHtml(auditEventTitle(x.event))}<div class="muted audit-event">${escapeHtml(x.event || '')}</div></td><td>${escapeHtml(x.ip || '')}</td><td>${escapeHtml(x.userAgent || '')}</td><td><div>${escapeHtml(describeAuditLog(x))}</div><button class="secondary mini audit-detail-btn" data-audit-detail="${id}">详情</button><pre class="audit-detail hidden" id="${id}">${detail}</pre></td></tr>`;
+}
+
+function toggleAuditDetail(id) {
+  const el = $(id);
+  if (!el) return;
+  el.classList.toggle('hidden');
 }
 
 function renderPagedTable(key, items, tbodyId, rowHtml) {
@@ -272,14 +336,80 @@ function renderAccountFilter() {
 
 function escapeHtml(s) { return String(s).replace(/[&<>"]/g, m => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[m])); }
 
+function currentConfigFormBody() {
+  const body = {};
+  ['apiKey', 'country', 'service', 'pool', 'maxPrice', 'pricingOption', 'maxAccountUses', 'successfulReuseThreshold', 'reuseUsedNumbersEnabled', 'timeoutSeconds', 'changeNumberAfterSeconds', 'pollIntervalSeconds', 'resendCooldownSeconds', 'refundRetrySeconds', 'mockMode', 'mockReceiveAfterChecks', 'purchaseEnabled', 'purchaseUrl', 'purchaseTextZh', 'purchaseTextEn'].forEach(k => {
+    if (k === 'apiKey' && !$(k).value) return;
+    body[k] = k === 'country' ? normalizeCountryValue($(k).value) : $(k).value;
+  });
+  return body;
+}
+
 async function saveConfig() {
   try {
-    const body = {};
-    ['apiKey', 'country', 'service', 'pool', 'maxPrice', 'pricingOption', 'maxAccountUses', 'successfulReuseThreshold', 'reuseUsedNumbersEnabled', 'timeoutSeconds', 'changeNumberAfterSeconds', 'pollIntervalSeconds', 'resendCooldownSeconds', 'refundRetrySeconds', 'mockMode', 'mockReceiveAfterChecks', 'purchaseEnabled', 'purchaseUrl', 'purchaseTextZh', 'purchaseTextEn'].forEach(k => { if (k === 'apiKey' && !$(k).value) return; body[k] = k === 'country' ? normalizeCountryValue($(k).value) : $(k).value; });
-    await req('/api/admin/config', { method: 'POST', body: JSON.stringify(body) });
+    await req('/api/admin/config', { method: 'POST', body: JSON.stringify(currentConfigFormBody()) });
     toast(t('saved'));
     await load();
   } catch (e) { toast(e.message, true); }
+}
+
+function renderTestPurchaseResult(result) {
+  const box = $('testPurchaseResult');
+  box.classList.remove('hidden');
+  box.innerHTML = `<b>测试购买成功</b>
+订单：${escapeHtml(result.orderid || '-')}
+号码：${escapeHtml(result.phone || '-')}
+Pool：${escapeHtml(result.poolUsed || '-')}
+尝试 Pool：${escapeHtml((result.triedPools || []).join(', ') || '-')}
+
+上游返回：
+${escapeHtml(JSON.stringify(result.upstream || {}, null, 2))}`;
+}
+
+async function testPurchase() {
+  const btn = $('testPurchase');
+  try {
+    if (!confirm('测试购买号码会真实调用上游购买接口；Mock Mode=true 时只会生成模拟号码。是否继续？')) return;
+    btn.disabled = true;
+    const box = $('testPurchaseResult');
+    box.classList.remove('hidden');
+    box.textContent = '正在保存当前配置并测试购买号码...';
+    await req('/api/admin/config', { method: 'POST', body: JSON.stringify(currentConfigFormBody()) });
+    const j = await req('/api/admin/test-purchase', { method: 'POST', body: JSON.stringify({}) });
+    renderTestPurchaseResult(j.result || {});
+    toast('测试购买成功');
+    await load({ silent: true });
+  } catch (e) {
+    const box = $('testPurchaseResult');
+    box.classList.remove('hidden');
+    box.textContent = `测试购买失败：${e.message}`;
+    toast(e.message, true);
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+async function importManualPool() {
+  const btn = $('importManualPool');
+  try {
+    const entries = $('manualPoolEntries').value.trim();
+    if (!entries) throw new Error('请输入自有号码池');
+    btn.disabled = true;
+    const j = await req('/api/admin/manual-pool', { method: 'POST', body: JSON.stringify({ entries, maxUses: $('manualPoolMaxUses').value || 3 }) });
+    const box = $('manualPoolResult');
+    box.classList.remove('hidden');
+    box.textContent = `导入完成：新增 ${j.created}，更新 ${j.updated}，错误 ${j.errors?.length || 0}` + (j.errors?.length ? `\n${JSON.stringify(j.errors, null, 2)}` : '');
+    $('manualPoolEntries').value = '';
+    toast('自有号码池已导入');
+    await load({ silent: true });
+  } catch (e) {
+    const box = $('manualPoolResult');
+    box.classList.remove('hidden');
+    box.textContent = `导入失败：${e.message}`;
+    toast(e.message, true);
+  } finally {
+    btn.disabled = false;
+  }
 }
 
 async function createCdk() { try { const j = await req('/api/admin/cdks', { method: 'POST', body: JSON.stringify({ count: $('cdkCount').value, note: $('cdkNote').value }) }); $('newCdks').textContent = j.cdks.map(x => x.code).join('\n'); toast(t('created')); await load(); } catch (e) { toast(e.message, true); } }
@@ -289,12 +419,55 @@ async function resetClientKey(id) { try { if (!confirm('确定重置 API Key？�
 async function toggleClient(id, status) { try { await req(`/api/admin/client/${id}/update`, { method: 'POST', body: JSON.stringify({ status: status === 'active' ? 'disabled' : 'active' }) }); toast('已更新'); await load(); } catch (e) { toast(e.message, true); } }
 async function redeemCdks(code) { try { const codes = code || $('redeemCdks').value; if (!codes) throw new Error('请输入 CDK'); const j = await req('/api/admin/cdks/redeem', { method: 'POST', body: JSON.stringify({ codes }) }); $('newCdks').textContent = `核销 ${j.redeemed}/${j.requested}，跳过 ${j.skipped}，不存在 ${j.missing}`; if (!code) $('redeemCdks').value = ''; toast('已核销'); await load(); } catch (e) { toast(e.message, true); } }
 
+function renderCdkUsage(usage) {
+  const box = $('cdkUsageBox');
+  const c = usage.cdk || {};
+  const sum = usage.summary || {};
+  const sessions = usage.sessions || [];
+  const rows = sessions.map(s => {
+    const msg = s.message?.text || (s.message?.raw ? JSON.stringify(s.message.raw) : '');
+    return `<tr><td>${escapeHtml(s.createdAt || '')}</td><td>${escapeHtml(s.status || '')}</td><td>${escapeHtml(s.phone || '-')}</td><td>${escapeHtml(s.orderid || '')}</td><td>${s.reused ? '是' : '否'}</td><td>${escapeHtml(s.receivedAt || s.message?.receivedAt || '')}</td><td>${escapeHtml(msg)}</td></tr>`;
+  }).join('');
+  box.classList.remove('hidden');
+  box.innerHTML = `
+    <div class="usage-head">
+      <div><b>${escapeHtml(c.code || '')}</b></div>
+      <div class="muted">状态：${escapeHtml(c.status || '')}；备注：${escapeHtml(c.note || '')}</div>
+    </div>
+    <div class="usage-summary">
+      <span>总会话 <b>${sum.totalSessions || 0}</b></span>
+      <span>成功 <b>${sum.successfulSessions || 0}</b></span>
+      <span>等待 <b>${sum.waitingSessions || 0}</b></span>
+      <span>超时 <b>${sum.timeoutSessions || 0}</b></span>
+      <span>更换 <b>${sum.changedSessions || 0}</b></span>
+      <span>复用 <b>${sum.reusedSessions || 0}</b></span>
+      <span>号码 <b>${sum.uniquePhones || 0}</b></span>
+    </div>
+    <div class="usage-meta">创建：${escapeHtml(c.createdAt || '')}<br>占用：${escapeHtml(c.reservedAt || '')}<br>使用：${escapeHtml(c.usedAt || c.redeemedAt || '')}<br>使用会话：${escapeHtml(c.usedSessionId || '')}<br>号码列表：${escapeHtml((sum.phones || []).join(', ') || '-')}</div>
+    <table class="usage-table"><thead><tr><th>会话时间</th><th>状态</th><th>号码</th><th>订单</th><th>复用</th><th>短信时间</th><th>短信内容</th></tr></thead><tbody>${rows || '<tr><td colspan="7" class="muted">暂无使用记录</td></tr>'}</tbody></table>`;
+}
+
+async function queryCdkUsage(code) {
+  try {
+    const query = String(code || $('cdkUsageCode').value || '').trim();
+    if (!query) throw new Error('请输入 CDK');
+    $('cdkUsageCode').value = query;
+    const j = await req('/api/admin/cdks/usage', { method: 'POST', body: JSON.stringify({ code: query }) });
+    renderCdkUsage(j.usage);
+    toast('已查询');
+  } catch (e) { toast(e.message, true); }
+}
+
 document.querySelectorAll('.tab').forEach(b => b.onclick = () => { document.querySelectorAll('.tab').forEach(x => x.classList.remove('active')); b.classList.add('active'); document.querySelectorAll('.panel').forEach(p => p.classList.add('hidden')); $('panel-' + b.dataset.tab).classList.remove('hidden'); });
 $('loadBtn').onclick = load;
 $('refreshBtn').onclick = refreshData;
 $('saveConfig').onclick = saveConfig;
+$('testPurchase').onclick = testPurchase;
+$('importManualPool').onclick = importManualPool;
 $('createCdk').onclick = createCdk;
 $('redeemCdkBtn').onclick = () => redeemCdks();
+$('queryCdkUsage').onclick = () => queryCdkUsage();
+$('cdkUsageCode').addEventListener('keydown', e => { if (e.key === 'Enter') queryCdkUsage(); });
 $('createClient').onclick = createClient;
 $('refreshCountries').onclick = () => loadCountries(true);
 $('country').addEventListener('change', renderCountryOptions);
