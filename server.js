@@ -2171,6 +2171,103 @@ app.post('/api/admin/cdks/redeem', requireSameOrigin, requireAdmin, (req, res) =
   res.json({ success: 1, ...result });
 });
 
+app.post('/api/admin/number/start', requireSameOrigin, requireAdmin, async (req, res, next) => {
+  try {
+    const phone = String(req.body?.phone || '').trim();
+    if (!phone) return res.status(400).json({ success: 0, message: '请输入手机号' });
+    const db = readDb();
+    const found = findApiSpecificAccount(db, { phone, forceUse: true });
+    if (!found.account) {
+      audit(db, req, 'admin.number_start_rejected', { phone: normalizePhoneSearch(phone), reason: found.availability.code, candidates: found.candidates.length, poolType: found.poolType });
+      return res.status(404).json({ success: 0, code: found.availability.code || 'NUMBER_NOT_FOUND', message: found.availability.message || '未找到该号码' });
+    }
+    const externalId = String(req.body?.externalId || `admin_${Date.now()}`).trim().slice(0, 120);
+    const virtualCdk = { code: `ADMIN-${makeId('req')}`, status: 'active' };
+    const allocated = await allocateSpecificAccount(virtualCdk.code, found.account.id, { virtualCdk, externalId, forceUse: true, req });
+    transact(wdb => audit(wdb, req, 'admin.number_start', { sessionId: allocated.session.id, accountId: allocated.account.id, phone: allocated.account.phone, poolType: accountPoolType(allocated.account), reused: allocated.reused }));
+    res.json(apiNumberResponse(allocated));
+  } catch (e) { next(e); }
+});
+
+app.post('/api/admin/session/check', requireSameOrigin, requireAdmin, async (req, res, next) => {
+  try {
+    requireFields(req.body, ['sessionId']);
+    const sessionId = String(req.body.sessionId);
+    const db = readDb();
+    const session = db.sessions.find(s => s.id === sessionId);
+    if (!session) return res.status(404).json({ success: 0, message: '会话不存在' });
+    const account = db.accounts.find(a => a.id === session.accountId);
+    if (!account) return res.status(404).json({ success: 0, message: '号码不存在' });
+
+    if (session.status === 'received' || session.counted) {
+      return res.json({ success: 1, ...apiSessionPayload(session, account, null) });
+    }
+
+    const timedOut = Date.now() > new Date(session.deadlineAt).getTime();
+    if (timedOut && session.status === 'waiting') {
+      transact(wdb => {
+        const s = wdb.sessions.find(x => x.id === sessionId);
+        const a = wdb.accounts.find(x => x.id === account.id);
+        if (s) { s.status = 'timeout'; s.updatedAt = nowIso(); }
+        if (a && isManualPoolAccount(a) && Number(a.useCount || 0) < accountMaxUses(a, wdb.config)) { cooldownAccount(a, wdb.config); }
+        else if (a && a.disabledPending) { cooldownAccount(a, wdb.config); }
+        else if (a && Number(a.useCount || 0) === 0 && !session.reused) { a.status = 'failed'; a.updatedAt = nowIso(); }
+        else if (a && session.reused) { cooldownReusedAccount(a, wdb.config); }
+        audit(wdb, req, 'admin.session_timeout', { sessionId, accountId: account.id, phone: account.phone });
+      });
+      if (!isManualPoolAccount(account)) refundIfEligible(readDb(), sessionId).catch(() => {});
+      const fresh = readDb();
+      const s = fresh.sessions.find(x => x.id === sessionId);
+      const a = fresh.accounts.find(x => x.id === account.id);
+      return res.json({ success: 1, timedOut: true, ...apiSessionPayload(s, a, null) });
+    }
+
+    let data;
+    try {
+      data = isManualPoolAccount(account) ? await checkManualSms(account) : await checkSms(getRuntimeConfig(db), account.orderid);
+    } catch (e) {
+      const fresh = transact(wdb => {
+        const s = wdb.sessions.find(x => x.id === sessionId);
+        const a = wdb.accounts.find(x => x.id === account.id);
+        if (s) { s.lastCheckError = scrubSensitive({ message: e.message, details: e.details || null }); s.updatedAt = nowIso(); }
+        if (a) { a.lastCheckError = scrubSensitive({ message: e.message, details: e.details || null }); a.updatedAt = nowIso(); }
+        audit(wdb, req, 'admin.sms_check_error', { sessionId, accountId: account.id, message: e.message, details: e.details || null });
+        return { session: s, account: a };
+      });
+      return res.json({ success: 1, received: false, ...apiSessionPayload(fresh.session, fresh.account, null) });
+    }
+
+    const msg = extractMessage(data);
+    const updated = transact(wdb => {
+      const s = wdb.sessions.find(x => x.id === sessionId);
+      const a = wdb.accounts.find(x => x.id === account.id);
+      s.lastCheck = data;
+      s.updatedAt = nowIso();
+      a.lastCheck = data;
+      a.updatedAt = nowIso();
+      if (msg && !s.counted) {
+        s.status = 'received';
+        s.message = msg;
+        s.counted = true;
+        s.receivedAt = msg.receivedAt;
+        a.useCount = Number(a.useCount || 0) + 1;
+        a.lastMessage = msg;
+        a.lastMessageAt = msg.receivedAt;
+        cooldownAccount(a, wdb.config);
+        chargeClientForSession(wdb, s, a);
+        wdb.logs.unshift({ id: makeId('log'), type: 'admin_received', sessionId: s.id, accountId: a.id, createdAt: nowIso() });
+        audit(wdb, req, 'admin.sms_received', { sessionId: s.id, accountId: a.id, phone: a.phone });
+      } else if (msg) {
+        s.message = s.message || msg;
+      } else if (isSuccessFlagFalse(data)) {
+        s.status = 'waiting';
+      }
+      return { session: s, account: a };
+    });
+    res.json({ success: 1, timedOut: false, ...apiSessionPayload(updated.session, updated.account, null) });
+  } catch (e) { next(e); }
+});
+
 app.get('/api/catalog/countries', requireAdmin, async (req, res, next) => { try { const result = await getCachedCountries(getRuntimeConfig(readDb()), { force: req.query.force === '1' || req.query.refresh === '1' }); res.json({ success: 1, ...result }); } catch (e) { next(e); } });
 app.get('/api/catalog/services', requireAdmin, async (req, res, next) => { try { res.json({ success: 1, data: await listServices(getRuntimeConfig(readDb())) }); } catch (e) { next(e); } });
 app.get('/api/catalog/pools', requireAdmin, async (req, res, next) => { try { res.json({ success: 1, data: await listPools(getRuntimeConfig(readDb())) }); } catch (e) { next(e); } });

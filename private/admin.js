@@ -17,6 +17,8 @@ const pageState = {
   audit: { page: 1, pageSize: 20 },
 };
 const $ = id => document.getElementById(id);
+let adminNumberSession = null;
+let adminNumberPollHandle = null;
 
 function t(k) { return I18N[lang][k] || k; }
 function applyLang() { document.documentElement.lang = lang === 'zh' ? 'zh-CN' : 'en'; document.querySelectorAll('[data-i18n]').forEach(e => e.textContent = t(e.dataset.i18n)); $('langBtn').textContent = lang === 'zh' ? 'English' : '中文'; }
@@ -111,7 +113,11 @@ function render() {
   renderAccountFilter();
   const accountStatus = $('accountStatusFilter')?.value || '';
   const accounts = accountStatus ? state.accounts.filter(x => String(x.status || '') === accountStatus) : state.accounts;
-  renderPagedTable('accounts', accounts || [], 'accountRows', x => `<tr><td>${escapeHtml(x.phone || '-')}</td><td>${x.useCount}/${x.maxUses}</td><td>${escapeHtml(x.status)}${x.source ? `<div class="muted audit-event">${escapeHtml(x.source)}</div>` : ''}</td><td>${escapeHtml(x.orderid)}</td><td>${escapeHtml(x.updatedAt || '')}</td></tr>`);
+  renderPagedTable('accounts', accounts || [], 'accountRows', x => `<tr><td>${escapeHtml(x.phone || '-')}</td><td>${x.useCount}/${x.maxUses}</td><td>${escapeHtml(x.status)}${x.source ? `<div class="muted audit-event">${escapeHtml(x.source)}</div>` : ''}</td><td>${escapeHtml(x.orderid)}</td><td>${escapeHtml(x.updatedAt || '')}</td><td><button class="secondary" data-admin-start-phone="${escapeHtml(x.phone || '')}">接码</button></td></tr>`);
+  document.querySelectorAll('[data-admin-start-phone]').forEach(b => b.onclick = () => {
+    $('adminNumberPhone').value = b.dataset.adminStartPhone || '';
+    startAdminNumber();
+  });
   renderManualPool();
   renderPagedTable('sessions', state.sessions || [], 'sessionRows', x => `<tr><td>${escapeHtml(x.id)}</td><td>${escapeHtml(x.phone || '-')}</td><td>${escapeHtml(x.status)}</td><td>${x.message ? escapeHtml(x.message.text || JSON.stringify(x.message.raw)) : ''}</td><td>${escapeHtml(x.deadlineAt || '')}</td></tr>`);
   renderPagedTable('clients', state.clients || [], 'clientRows', c => `<tr><td>${escapeHtml(c.name)}</td><td>${escapeHtml(c.apiKeyPrefix || '')}</td><td>${c.balance}</td><td>${c.pricePerSuccess}</td><td>${escapeHtml(c.status)}</td><td><button class="secondary" data-recharge="${escapeHtml(c.id)}">充值</button> <button class="secondary" data-reset-key="${escapeHtml(c.id)}">重置Key</button> <button class="danger" data-toggle-client="${escapeHtml(c.id)}" data-status="${escapeHtml(c.status)}">${c.status === 'active' ? '禁用' : '启用'}</button></td></tr>`);
@@ -365,6 +371,102 @@ function renderAccountFilter() {
   sel.value = statuses.includes(current) ? current : '';
 }
 
+function normalizePhoneDigits(phone) {
+  return String(phone || '').replace(/[^\d]/g, '');
+}
+
+function accountPoolLabel(x) {
+  return isManualPoolAccountRow(x) ? '自有号池' : 'SMSPool';
+}
+
+function findAdminNumberRows(phone) {
+  const q = normalizePhoneDigits(phone);
+  if (!q) return [];
+  return (state?.accounts || []).filter(x => {
+    const p = normalizePhoneDigits(x.phone || '');
+    return p === q || p.endsWith(q);
+  });
+}
+
+function renderAdminNumberResult(html, bad = false) {
+  const box = $('adminNumberResult');
+  if (!box) return;
+  box.classList.remove('hidden');
+  box.style.borderColor = bad ? '#ef4444' : '#334155';
+  box.innerHTML = html;
+}
+
+function queryAdminNumber() {
+  try {
+    const phone = $('adminNumberPhone').value.trim();
+    if (!phone) throw new Error('请输入手机号');
+    const rows = findAdminNumberRows(phone);
+    if (!rows.length) {
+      renderAdminNumberResult(`未找到号码：${escapeHtml(phone)}`, true);
+      return;
+    }
+    renderAdminNumberResult(rows.map(x => `号码：${escapeHtml(x.phone || '-')}
+号池：${escapeHtml(accountPoolLabel(x))}
+状态：${escapeHtml(x.status || '-')}
+使用：${Number(x.useCount || 0)}/${Number(x.maxUses || 3)}
+订单：${escapeHtml(x.orderid || '-')}
+更新：${escapeHtml(x.updatedAt || '-')}`).join('\n\n---\n\n'));
+  } catch (e) { toast(e.message, true); }
+}
+
+function renderAdminSession(j, title = '接码会话') {
+  const message = j.message || '';
+  const code = j.code || '';
+  renderAdminNumberResult(`<b>${escapeHtml(title)}</b>
+号码：${escapeHtml(j.phone || '-')}
+号池：${escapeHtml(j.poolType || '-')}
+状态：${escapeHtml(j.status || '-')}
+会话：${escapeHtml(j.sessionId || '-')}
+收到：${j.received ? '是' : '否'}
+验证码：${escapeHtml(code || '-')}
+短信：${escapeHtml(message || '-')}
+过期：${escapeHtml(j.expiresAt || '-')}`);
+}
+
+async function startAdminNumber() {
+  const btn = $('adminNumberStart');
+  try {
+    const phone = $('adminNumberPhone').value.trim();
+    if (!phone) throw new Error('请输入手机号');
+    clearInterval(adminNumberPollHandle);
+    btn.disabled = true;
+    renderAdminNumberResult('正在开始接码...');
+    const j = await req('/api/admin/number/start', { method: 'POST', body: JSON.stringify({ phone }) });
+    adminNumberSession = { sessionId: j.sessionId };
+    renderAdminSession(j, '已开始接码');
+    toast('已开始接码');
+    await load({ silent: true });
+    const interval = Math.max(Number(j.pollIntervalSeconds || state?.config?.pollIntervalSeconds || 5), 2) * 1000;
+    adminNumberPollHandle = setInterval(checkAdminNumber, interval);
+  } catch (e) {
+    renderAdminNumberResult(`开始接码失败：${escapeHtml(e.message)}`, true);
+    toast(e.message, true);
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+async function checkAdminNumber() {
+  try {
+    if (!adminNumberSession?.sessionId) throw new Error('没有正在接码的会话');
+    const j = await req('/api/admin/session/check', { method: 'POST', body: JSON.stringify({ sessionId: adminNumberSession.sessionId }) });
+    renderAdminSession(j, j.received ? '已收到短信' : '等待短信中');
+    if (j.received || j.status === 'received' || j.status === 'timeout') {
+      clearInterval(adminNumberPollHandle);
+      await load({ silent: true });
+    }
+  } catch (e) {
+    clearInterval(adminNumberPollHandle);
+    renderAdminNumberResult(`查询短信失败：${escapeHtml(e.message)}`, true);
+    toast(e.message, true);
+  }
+}
+
 function escapeHtml(s) { return String(s).replace(/[&<>"]/g, m => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[m])); }
 
 function currentConfigFormBody() {
@@ -515,6 +617,9 @@ $('refreshCountries').onclick = () => loadCountries(true);
 $('country').addEventListener('change', renderCountryOptions);
 $('country').addEventListener('input', renderCountryOptions);
 $('accountStatusFilter').onchange = () => { pageState.accounts.page = 1; render(); };
+$('adminNumberQuery').onclick = queryAdminNumber;
+$('adminNumberStart').onclick = startAdminNumber;
+$('adminNumberPhone').addEventListener('keydown', e => { if (e.key === 'Enter') queryAdminNumber(); });
 $('statsDays').onchange = loadStats;
 $('langBtn').onclick = () => { lang = lang === 'zh' ? 'en' : 'zh'; localStorage.lang = lang; applyLang(); };
 window.addEventListener('resize', () => { if (state?.stats) drawDailyChart(state.stats.daily || []); });
