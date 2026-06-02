@@ -837,8 +837,8 @@ function accountPoolType(account) {
 function phoneMatchesAccount(account, phoneQuery) {
   const accountPhone = normalizePhoneSearch(account?.phone || '');
   const q = normalizePhoneSearch(phoneQuery || '');
-  if (!q) return false;
-  return accountPhone === q || accountPhone.endsWith(q);
+  if (!q || !accountPhone) return false;
+  return accountPhone === q || accountPhone.endsWith(q) || q.endsWith(accountPhone);
 }
 
 function findApiSpecificAccount(db, { accountId = '', phone = '', ignoreCooldown = false, forceUse = false } = {}) {
