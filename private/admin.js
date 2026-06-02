@@ -372,7 +372,34 @@ function renderAccountFilter() {
 }
 
 function normalizePhoneDigits(phone) {
-  return String(phone || '').replace(/[^\d]/g, '');
+  return String(phone || '')
+    .normalize('NFKC')
+    .replace(/(?:\b(?:ext|extension|分机|转|x)\b|分机|转)\s*[:.#-]?\s*\+?\d+\s*$/i, '')
+    .replace(/[^\d]/g, '');
+}
+
+function phoneDigitVariants(phone) {
+  const out = new Set();
+  const queue = [];
+  const push = v => {
+    v = String(v || '').replace(/[^\d]/g, '');
+    if (v && !out.has(v)) { out.add(v); queue.push(v); }
+  };
+  push(normalizePhoneDigits(phone));
+  for (let i = 0; i < queue.length; i++) {
+    const v = queue[i];
+    if (v.startsWith('00') && v.length > 9) push(v.slice(2));
+    if (v.startsWith('011') && v.length > 10) push(v.slice(3));
+    if (v.startsWith('1') && v.length === 11) push(v.slice(1));
+    if (v.startsWith('0') && v.length > 8) push(v.slice(1));
+  }
+  return [...out];
+}
+
+function phoneMatchesRow(rowPhone, queryPhone) {
+  const rows = phoneDigitVariants(rowPhone);
+  const queries = phoneDigitVariants(queryPhone);
+  return rows.some(a => queries.some(q => a === q || (Math.min(a.length, q.length) >= 7 && (a.endsWith(q) || q.endsWith(a)))));
 }
 
 function accountPoolLabel(x) {
@@ -380,12 +407,8 @@ function accountPoolLabel(x) {
 }
 
 function findAdminNumberRows(phone) {
-  const q = normalizePhoneDigits(phone);
-  if (!q) return [];
-  return (state?.accounts || []).filter(x => {
-    const p = normalizePhoneDigits(x.phone || '');
-    return p === q || p.endsWith(q);
-  });
+  if (!normalizePhoneDigits(phone)) return [];
+  return (state?.accounts || []).filter(x => phoneMatchesRow(x.phone || '', phone));
 }
 
 function renderAdminNumberResult(html, bad = false) {

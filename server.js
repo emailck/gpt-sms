@@ -270,7 +270,32 @@ function maskPhone(phone = '') {
 }
 
 function normalizePhoneSearch(phone = '') {
-  return String(phone || '').replace(/[^\d]/g, '');
+  return String(phone || '')
+    .normalize('NFKC')
+    .replace(/(?:\b(?:ext|extension|分机|转|x)\b|分机|转)\s*[:.#-]?\s*\+?\d+\s*$/i, '')
+    .replace(/[^\d]/g, '');
+}
+
+function phoneDigitVariants(phone = '') {
+  const base = normalizePhoneSearch(phone);
+  const out = new Set();
+  const queue = [];
+  const push = (v) => {
+    v = String(v || '').replace(/[^\d]/g, '');
+    if (v && !out.has(v)) { out.add(v); queue.push(v); }
+  };
+  push(base);
+  for (let i = 0; i < queue.length; i++) {
+    const v = queue[i];
+    // International dialing prefixes: 00 1 202... / 011 1 202...
+    if (v.startsWith('00') && v.length > 9) push(v.slice(2));
+    if (v.startsWith('011') && v.length > 10) push(v.slice(3));
+    // NANP country code, common for US OAuth phone prompts.
+    if (v.startsWith('1') && v.length === 11) push(v.slice(1));
+    // Local trunk prefix used by some countries/forms.
+    if (v.startsWith('0') && v.length > 8) push(v.slice(1));
+  }
+  return [...out];
 }
 
 function maskOrderId(orderid = '') {
@@ -835,10 +860,18 @@ function accountPoolType(account) {
 }
 
 function phoneMatchesAccount(account, phoneQuery) {
-  const accountPhone = normalizePhoneSearch(account?.phone || '');
-  const q = normalizePhoneSearch(phoneQuery || '');
-  if (!q || !accountPhone) return false;
-  return accountPhone === q || accountPhone.endsWith(q) || q.endsWith(accountPhone);
+  const accountPhones = phoneDigitVariants(account?.phone || '');
+  const queries = phoneDigitVariants(phoneQuery || '');
+  for (const a of accountPhones) {
+    for (const q of queries) {
+      if (!a || !q) continue;
+      if (a === q) return true;
+      // Avoid accidental matches on very short fragments; full phone inputs are
+      // normally >=7 digits, while this still handles country-code variants.
+      if (Math.min(a.length, q.length) >= 7 && (a.endsWith(q) || q.endsWith(a))) return true;
+    }
+  }
+  return false;
 }
 
 function findApiSpecificAccount(db, { accountId = '', phone = '', ignoreCooldown = false, forceUse = false } = {}) {
@@ -850,7 +883,7 @@ function findApiSpecificAccount(db, { accountId = '', phone = '', ignoreCooldown
   const scored = candidates
     .map(a => ({
       account: a,
-      exact: phoneQuery ? Number(normalizePhoneSearch(a.phone) === phoneQuery) : 1,
+      exact: phoneQuery ? Number(phoneDigitVariants(a.phone).some(x => phoneDigitVariants(phoneQuery).includes(x))) : 1,
       availability: forceUse ? accountCanForceUse(a) : accountCanContinue(a, db.config, { ignoreCooldown }),
       lastUseTime: accountLastSuccessfulUseTime(db, a),
     }))
