@@ -34,8 +34,8 @@ if (process.env.TRUST_PROXY || IS_PROD) {
   app.set('trust proxy', process.env.TRUST_PROXY ? Number(process.env.TRUST_PROXY) || process.env.TRUST_PROXY : 1);
 }
 app.use(helmet({ contentSecurityPolicy: { directives: { defaultSrc: ["'self'"], scriptSrc: ["'self'"], styleSrc: ["'self'", "'unsafe-inline'"], imgSrc: ["'self'", 'data:'], connectSrc: ["'self'"], objectSrc: ["'none'"], baseUri: ["'self'"] } } }));
-app.use(express.json({ limit: '64kb' }));
-app.use(express.urlencoded({ extended: true, limit: '64kb' }));
+app.use(express.json({ limit: '2mb' }));
+app.use(express.urlencoded({ extended: true, limit: '2mb' }));
 app.use(cookieParser());
 app.use('/api/cdk', rateLimit({ windowMs: 60_000, limit: 10, standardHeaders: true, legacyHeaders: false }));
 app.use('/api/session', rateLimit({ windowMs: 60_000, limit: 90, standardHeaders: true, legacyHeaders: false }));
@@ -164,10 +164,13 @@ function apiSessionPayload(session, account, client = null) {
   const payload = frontendSessionPayload(session, account, cfg);
   const msg = session?.message?.text || '';
   const code = msg.match(/\b\d{4,8}\b/)?.[0] || '';
+  const poolType = accountPoolType(account);
   return {
     sessionId: session.id,
     sessionToken: undefined,
     phone: account?.phone || session.phone || '',
+    poolType,
+    numberSource: account?.source || (poolType === 'manual_pool' ? 'manual_pool' : 'new'),
     status: payload.session.status,
     received: payload.session.status === 'received' || !!session.counted,
     reused: !!session.reused,
@@ -264,6 +267,10 @@ function maskPhone(phone = '') {
   const s = String(phone || '');
   if (s.length <= 4) return s ? '****' : '';
   return `${s.slice(0, 3)}****${s.slice(-4)}`;
+}
+
+function normalizePhoneSearch(phone = '') {
+  return String(phone || '').replace(/[^\d]/g, '');
 }
 
 function maskOrderId(orderid = '') {
@@ -753,15 +760,55 @@ function numberCooldownSeconds(config) {
 
 function cooldownAccount(account, config, seconds = numberCooldownSeconds(config)) {
   if (!account) return;
-  account.status = Number(account.useCount || 0) >= accountMaxUses(account, config) ? 'used_up' : 'available';
+  account.status = account.disabledPending || account.status === 'disabled'
+    ? 'disabled'
+    : (Number(account.useCount || 0) >= accountMaxUses(account, config) ? 'used_up' : 'available');
   account.resendCooldownUntil = addSecondsIso(seconds);
   account.updatedAt = nowIso();
   delete account.resendError;
   delete account.resendingAt;
+  if (account.status === 'disabled') delete account.disabledPending;
 }
 
 function cooldownReusedAccount(account, config) {
   cooldownAccount(account, config, numberCooldownSeconds(config));
+}
+
+function accountCanContinue(account, config, { ignoreCooldown = false } = {}) {
+  if (!account) return { ok: false, code: 'NUMBER_NOT_FOUND', message: '号码不存在' };
+  if (!accountMatchesConfig(account, config) && !manualPoolMatchesConfig(account, config)) {
+    return { ok: false, code: 'CONFIG_MISMATCH', message: '号码国家/服务与当前配置不匹配' };
+  }
+  const status = String(account.status || 'available');
+  if (BUSY_ACCOUNT_STATUSES.has(status)) return { ok: false, code: 'NUMBER_BUSY', message: '号码正在使用中' };
+  if (TERMINAL_ACCOUNT_STATUSES.has(status)) return { ok: false, code: 'NUMBER_UNAVAILABLE', message: '号码不可用' };
+  if (!['available', 'resend_failed'].includes(status)) return { ok: false, code: 'NUMBER_UNAVAILABLE', message: `号码状态不可用: ${status}` };
+  if (Number(account.useCount || 0) >= accountMaxUses(account, config)) return { ok: false, code: 'NUMBER_USED_UP', message: '号码已达到最大成功次数' };
+  if (!ignoreCooldown && account.resendCooldownUntil && Date.now() <= new Date(account.resendCooldownUntil).getTime()) {
+    return { ok: false, code: 'NUMBER_COOLDOWN', message: '号码冷却中' };
+  }
+  if (!isManualPoolAccount(account) && !account.orderid) return { ok: false, code: 'ORDER_NOT_FOUND', message: '原号码缺少订单号，无法继续接码' };
+  if (isManualPoolAccount(account) && !account.smsUrl) return { ok: false, code: 'SMS_URL_NOT_FOUND', message: '自有号码缺少短信查询URL' };
+  return { ok: true };
+}
+
+function publicApiAccount(account, config = readDb().config) {
+  const availability = accountCanContinue(account, config);
+  return {
+    id: account.id,
+    phone: account.phone,
+    poolType: accountPoolType(account),
+    status: account.status,
+    source: account.source || 'new',
+    useCount: Number(account.useCount || 0),
+    maxUses: accountMaxUses(account, config),
+    available: availability.ok && !account.disabledPending,
+    disabledPending: !!account.disabledPending,
+    unavailableCode: availability.ok ? undefined : availability.code,
+    unavailableReason: account.disabledPending ? '号码使用结束后将禁用' : (availability.ok ? undefined : availability.message),
+    lastMessageAt: account.lastMessageAt || null,
+    updatedAt: account.updatedAt || null,
+  };
 }
 
 function accountMatchesConfig(account, config) {
@@ -776,6 +823,47 @@ function isManualPoolAccount(account) {
   return ['manual', 'manual_pool', 'sms789'].includes(String(account?.source || '').toLowerCase());
 }
 
+function accountPoolType(account) {
+  return isManualPoolAccount(account) ? 'manual_pool' : 'smspool';
+}
+
+function phoneMatchesAccount(account, phoneQuery) {
+  const accountPhone = normalizePhoneSearch(account?.phone || '');
+  const q = normalizePhoneSearch(phoneQuery || '');
+  if (!q) return false;
+  return accountPhone === q || accountPhone.endsWith(q);
+}
+
+function findApiSpecificAccount(db, { accountId = '', phone = '', ignoreCooldown = false } = {}) {
+  const phoneQuery = normalizePhoneSearch(phone);
+  const candidates = accountId
+    ? (db.accounts || []).filter(a => String(a.id || '') === String(accountId))
+    : (db.accounts || []).filter(a => phoneMatchesAccount(a, phoneQuery));
+
+  const scored = candidates
+    .map(a => ({
+      account: a,
+      exact: phoneQuery ? Number(normalizePhoneSearch(a.phone) === phoneQuery) : 1,
+      availability: accountCanContinue(a, db.config, { ignoreCooldown }),
+      lastUseTime: accountLastSuccessfulUseTime(db, a),
+    }))
+    .sort((a, b) =>
+      b.exact - a.exact ||
+      Number(b.availability.ok) - Number(a.availability.ok) ||
+      a.lastUseTime - b.lastUseTime ||
+      String(b.account.updatedAt || '').localeCompare(String(a.account.updatedAt || ''))
+    );
+
+  const selected = scored.find(x => x.availability.ok) || null;
+  const first = scored[0] || null;
+  return {
+    account: selected?.account || null,
+    candidates: scored.map(x => x.account),
+    poolType: selected ? accountPoolType(selected.account) : (first ? accountPoolType(first.account) : ''),
+    availability: selected?.availability || first?.availability || { code: 'NUMBER_NOT_FOUND', message: '未找到可继续接码的号码' },
+  };
+}
+
 function manualPoolMatchesConfig(account, config) {
   return isManualPoolAccount(account) &&
     String(account.country) === String(config.country) &&
@@ -787,10 +875,10 @@ function parseManualPoolEntries(input) {
   const parsed = [];
   const errors = [];
   rows.forEach((line, idx) => {
-    const parts = line.split(/\s*-{2,}\s*/);
-    if (parts.length < 2) { errors.push({ line: idx + 1, message: '格式应为 手机号----短信查询URL' }); return; }
-    const phone = String(parts.shift() || '').trim();
-    const smsUrl = parts.join('----').trim();
+    const m = line.match(/^\s*(\+?\d{7,20})\s*(?:-{2,}|[,\t|，\s]+)\s*(https?:\/\/\S+)\s*$/i);
+    if (!m) { errors.push({ line: idx + 1, message: '格式应为 手机号----短信查询URL', sample: line.slice(0, 80) }); return; }
+    const phone = String(m[1] || '').trim();
+    const smsUrl = String(m[2] || '').trim();
     if (!/^\+?\d{7,20}$/.test(phone)) { errors.push({ line: idx + 1, message: '手机号格式无效' }); return; }
     try {
       const u = new URL(smsUrl);
@@ -891,6 +979,8 @@ function expireStaleWaitingSessions(db, config) {
     }
     if (account) {
       if (isManualPoolAccount(account) && Number(account.useCount || 0) < accountMaxUses(account, config)) {
+        cooldownAccount(account, config);
+      } else if (account.disabledPending) {
         cooldownAccount(account, config);
       } else if (Number(account.useCount || 0) === 0 && !session.reused) {
         account.status = 'failed';
@@ -1003,6 +1093,95 @@ function reserveManualPoolAccount(cdkCode, config, opts = {}) {
     wdb.logs.unshift({ id: makeId('log'), type: 'manual_pool_allocate', sessionId: session.id, accountId: account.id, createdAt: nowIso() });
     audit(wdb, null, 'system.manual_pool_allocate', { sessionId: session.id, accountId: account.id, phone: account.phone, cdk: maskCdk(c.code) });
     return { session, sessionToken, account, reused: !!session.reused };
+  });
+}
+
+async function allocateSpecificAccount(cdkCode, accountId, opts = {}) {
+  const snapshot = readDb();
+  const config = getRuntimeConfig(snapshot);
+  if (expireStaleWaitingSessions(snapshot, config)) { writeDb(snapshot); return allocateSpecificAccount(cdkCode, accountId, opts); }
+
+  const reserved = transact(wdb => {
+    const c = opts.virtualCdk || wdb.cdks.find(x => x.code.toUpperCase() === cdkCode);
+    if (!c || (c.status || 'active') !== 'active') throw Object.assign(new Error('CDK 不可用'), { status: 400, code: 'CDK_UNAVAILABLE' });
+    const a = wdb.accounts.find(x => x.id === accountId);
+    const availability = accountCanContinue(a, wdb.config, { ignoreCooldown: !!opts.ignoreCooldown });
+    if (!availability.ok) throw Object.assign(new Error(availability.message), { status: 409, code: availability.code });
+
+    const ts = nowIso();
+    const sessionToken = randomToken();
+    if (isManualPoolAccount(a)) {
+      a.status = 'waiting';
+      a.updatedAt = ts;
+      const session = {
+        id: makeId('sess'), sessionTokenHash: hashToken(sessionToken), sessionTokenEncrypted: encryptSecret(sessionToken), cdk: c.code, accountId: a.id, orderid: a.orderid, phone: a.phone,
+        country: a.country, service: a.service, pool: a.pool || 'manual', status: 'waiting', counted: false,
+        reused: Number(a.useCount || 0) > 0, clientId: opts.clientId || null, externalId: opts.externalId || '', billed: false, source: a.source || 'manual_pool', allocationMode: 'specific_number', createdAt: ts, updatedAt: ts, deadlineAt: addSecondsIso(wdb.config.timeoutSeconds || 120),
+      };
+      if (!opts.virtualCdk) { c.status = 'reserved'; c.reservedAt = session.createdAt; c.reservedSessionId = session.id; }
+      wdb.sessions.unshift(session);
+      wdb.logs.unshift({ id: makeId('log'), type: 'specific_number_allocate', sessionId: session.id, accountId: a.id, createdAt: ts });
+      audit(wdb, opts.req || null, 'api.specific_number_allocated', { clientId: opts.clientId || null, sessionId: session.id, accountId: a.id, phone: a.phone, source: a.source || 'manual_pool' });
+      return { session, sessionToken, account: a, reused: !!session.reused };
+    }
+
+    a.status = 'resending';
+    a.resendingAt = ts;
+    a.updatedAt = ts;
+    if (!opts.virtualCdk) {
+      c.status = 'resending';
+      c.reservedAt = ts;
+      c.reservedAccountId = a.id;
+    }
+    return { account: { ...a }, sessionToken };
+  });
+
+  if (reserved.session) return reserved;
+
+  try {
+    await resendSms(config, reserved.account.orderid);
+  } catch (e) {
+    const cooldown = retryAfterSecondsFromError(e, config.resendCooldownSeconds || 300);
+    transact(wdb => {
+      const a = wdb.accounts.find(x => x.id === reserved.account.id);
+      if (a) {
+        a.status = 'resend_failed';
+        a.resendError = scrubSensitive({ message: e.message, details: e.details || null });
+        a.resendCooldownUntil = addSecondsIso(cooldown);
+        a.updatedAt = nowIso();
+        delete a.resendingAt;
+      }
+      const c = opts.virtualCdk ? null : wdb.cdks.find(x => x.code.toUpperCase() === cdkCode);
+      if (c && c.status === 'resending' && c.reservedAccountId === reserved.account.id) {
+        c.status = 'active';
+        c.reservedAt = null;
+        delete c.reservedAccountId;
+      }
+      audit(wdb, opts.req || null, 'api.specific_number_resend_failed', { clientId: opts.clientId || null, accountId: reserved.account.id, phone: reserved.account.phone, cooldownSeconds: cooldown, error: e.message, details: e.details || null });
+    });
+    throw e;
+  }
+
+  return transact(wdb => {
+    const c = opts.virtualCdk || wdb.cdks.find(x => x.code.toUpperCase() === cdkCode);
+    const a = wdb.accounts.find(x => x.id === reserved.account.id);
+    if (!a || a.status !== 'resending') throw Object.assign(new Error('号码刚刚变为不可用，请重试'), { status: 409, code: 'NUMBER_UNAVAILABLE' });
+    if (!opts.virtualCdk && (!c || c.status !== 'resending' || c.reservedAccountId !== a.id)) throw Object.assign(new Error('CDK 不可用'), { status: 400, code: 'CDK_UNAVAILABLE' });
+    const ts = nowIso();
+    a.status = 'waiting';
+    a.updatedAt = ts;
+    delete a.resendingAt;
+    const sessionToken = reserved.sessionToken;
+    const session = {
+      id: makeId('sess'), sessionTokenHash: hashToken(sessionToken), sessionTokenEncrypted: encryptSecret(sessionToken), cdk: c.code, accountId: a.id, orderid: a.orderid, phone: a.phone,
+      country: a.country, service: a.service, pool: a.pool || '', status: 'waiting', counted: false,
+      reused: true, clientId: opts.clientId || null, externalId: opts.externalId || '', billed: false, allocationMode: 'specific_number', createdAt: ts, updatedAt: ts, deadlineAt: addSecondsIso(wdb.config.timeoutSeconds || 120),
+    };
+    if (!opts.virtualCdk) { c.status = 'reserved'; c.reservedAt = session.createdAt; c.reservedSessionId = session.id; delete c.reservedAccountId; }
+    wdb.sessions.unshift(session);
+    wdb.logs.unshift({ id: makeId('log'), type: 'specific_number_resend', sessionId: session.id, accountId: a.id, createdAt: ts });
+    audit(wdb, opts.req || null, 'api.specific_number_allocated', { clientId: opts.clientId || null, sessionId: session.id, accountId: a.id, phone: a.phone, source: a.source || 'new' });
+    return { session, sessionToken, account: a, reused: true };
   });
 }
 
@@ -1139,98 +1318,101 @@ async function allocateSession(cdkCode, opts = {}) {
   if (!config.mockMode && !config.apiKey) throw Object.assign(new Error('服务暂时不可用，请稍后再试'), { status: 503, publicMessage: true });
 
   const priority = String(config.numberPoolPriority || 'manual_first');
-  const poolOrder = priority === 'sms_first' ? ['sms', 'manual'] : (priority === 'manual_only' ? ['manual'] : (priority === 'sms_only' ? ['sms'] : ['manual', 'sms']));
-  let manualPoolAccount = null;
-  let reusable = null;
-  for (const poolType of poolOrder) {
-    if (poolType === 'manual' && !opts.skipManualPool) {
-      manualPoolAccount = reserveManualPoolAccount(cdkCode, config, opts);
-      if (manualPoolAccount) return manualPoolAccount;
-    }
-    if (poolType === 'sms' && !opts.skipReusable) {
-      reusable = reserveReusableAccountForResend(cdkCode, config, opts);
-      if (reusable) break;
-    }
-  }
-
-  if (reusable) {
-    try {
-      if (!isManualPoolAccount(reusable)) await resendSms(config, reusable.orderid);
-    } catch (e) {
-      const cooldown = retryAfterSecondsFromError(e, config.resendCooldownSeconds || 300);
-      transact(wdb => {
+  const reserveFromManualPool = () => opts.skipManualPool ? null : reserveManualPoolAccount(cdkCode, config, opts);
+  const reserveFromSmsPool = async () => {
+    const reusable = opts.skipReusable ? null : reserveReusableAccountForResend(cdkCode, config, opts);
+    if (reusable) {
+      try {
+        if (!isManualPoolAccount(reusable)) await resendSms(config, reusable.orderid);
+      } catch (e) {
+        const cooldown = retryAfterSecondsFromError(e, config.resendCooldownSeconds || 300);
+        transact(wdb => {
+          const a = wdb.accounts.find(x => x.id === reusable.id);
+          if (a) {
+            a.status = 'resend_failed';
+            a.resendError = scrubSensitive({ message: e.message, details: e.details || null });
+            a.resendCooldownUntil = addSecondsIso(cooldown);
+            a.updatedAt = nowIso();
+            delete a.resendingAt;
+          }
+          const c = wdb.cdks.find(x => x.code.toUpperCase() === cdkCode);
+          if (c && c.status === 'resending' && c.reservedAccountId === reusable.id) {
+            c.status = 'active';
+            c.reservedAt = null;
+            delete c.reservedAccountId;
+          }
+          audit(wdb, null, 'system.resend_failed_cooldown', { accountId: reusable.id, phone: reusable.phone, cooldownSeconds: cooldown, error: e.message, details: e.details || null });
+        });
+        return allocateSession(cdkCode, { ...opts, skipAccountIds: [...(opts.skipAccountIds || []), reusable.id] });
+      }
+      return transact(wdb => {
+        const c = opts.virtualCdk || wdb.cdks.find(x => x.code.toUpperCase() === cdkCode);
         const a = wdb.accounts.find(x => x.id === reusable.id);
-        if (a) {
-          a.status = 'resend_failed';
-          a.resendError = scrubSensitive({ message: e.message, details: e.details || null });
-          a.resendCooldownUntil = addSecondsIso(cooldown);
-          a.updatedAt = nowIso();
-          delete a.resendingAt;
-        }
-        const c = wdb.cdks.find(x => x.code.toUpperCase() === cdkCode);
-        if (c && c.status === 'resending' && c.reservedAccountId === reusable.id) {
-          c.status = 'active';
-          c.reservedAt = null;
-          delete c.reservedAccountId;
-        }
-        audit(wdb, null, 'system.resend_failed_cooldown', { accountId: reusable.id, phone: reusable.phone, cooldownSeconds: cooldown, error: e.message, details: e.details || null });
+        if (!opts.virtualCdk && (!c || c.status !== 'resending' || c.reservedAccountId !== a?.id)) throw Object.assign(new Error('CDK 不可用'), { status: 400 });
+        if (!a || a.status !== 'resending') throw Object.assign(new Error('号码刚刚变为不可用，请重试'), { status: 409 });
+        if (Number(a.useCount || 0) >= accountMaxUses(a, config)) throw Object.assign(new Error('号码刚刚变为不可用，请重试'), { status: 409 });
+        a.status = 'waiting';
+        a.updatedAt = nowIso();
+        delete a.resendingAt;
+        const sessionToken = randomToken();
+        const session = {
+          id: makeId('sess'), sessionTokenHash: hashToken(sessionToken), sessionTokenEncrypted: encryptSecret(sessionToken), cdk: c.code, accountId: a.id, orderid: a.orderid, phone: a.phone,
+          country: a.country, service: a.service, pool: a.pool || '', status: 'waiting', counted: false,
+          reused: true, clientId: opts.clientId || null, externalId: opts.externalId || '', billed: false, createdAt: nowIso(), updatedAt: nowIso(), deadlineAt: addSecondsIso(config.timeoutSeconds || 120),
+        };
+        if (!opts.virtualCdk) { c.status = 'reserved'; c.reservedAt = session.createdAt; c.reservedSessionId = session.id; delete c.reservedAccountId; }
+        wdb.sessions.unshift(session);
+        wdb.logs.unshift({ id: makeId('log'), type: 'reuse', sessionId: session.id, accountId: a.id, createdAt: nowIso() });
+        return { session, sessionToken, account: a, reused: true };
       });
-      return allocateSession(cdkCode, { ...opts, skipAccountIds: [...(opts.skipAccountIds || []), reusable.id] });
     }
+
+    const purchaseResult = await purchaseSmsAuto(config);
+    const upstream = purchaseResult.upstream;
+    const poolUsed = purchaseResult.poolUsed;
+    const orderid = String(extractOrderId(upstream) || '');
+    const phone = String(extractPhone(upstream) || '');
+    if (!orderid) {
+      const err = new Error('上游未返回 orderid');
+      err.status = 502;
+      err.details = upstream;
+      throw err;
+    }
+
     return transact(wdb => {
       const c = opts.virtualCdk || wdb.cdks.find(x => x.code.toUpperCase() === cdkCode);
-      const a = wdb.accounts.find(x => x.id === reusable.id);
-      if (!opts.virtualCdk && (!c || c.status !== 'resending' || c.reservedAccountId !== a?.id)) throw Object.assign(new Error('CDK 不可用'), { status: 400 });
-      if (!a || a.status !== 'resending') throw Object.assign(new Error('号码刚刚变为不可用，请重试'), { status: 409 });
-      if (Number(a.useCount || 0) >= accountMaxUses(a, config)) throw Object.assign(new Error('号码刚刚变为不可用，请重试'), { status: 409 });
-      a.status = 'waiting';
-      a.updatedAt = nowIso();
-      delete a.resendingAt;
+      if (!c || (c.status || 'active') !== 'active') throw Object.assign(new Error('CDK 不可用'), { status: 400 });
+      const account = {
+        id: makeId('acct'), orderid, phone, country: String(config.country), service: String(config.service), pool: String(poolUsed || config.pool || ''),
+        useCount: 0, maxUses: Number(config.maxAccountUses || 3), status: 'waiting', source: 'new', upstream,
+        createdAt: nowIso(), updatedAt: nowIso(), lastMessageAt: null,
+      };
       const sessionToken = randomToken();
       const session = {
-        id: makeId('sess'), sessionTokenHash: hashToken(sessionToken), sessionTokenEncrypted: encryptSecret(sessionToken), cdk: c.code, accountId: a.id, orderid: a.orderid, phone: a.phone,
-        country: a.country, service: a.service, pool: a.pool || '', status: 'waiting', counted: false,
-        reused: true, clientId: opts.clientId || null, externalId: opts.externalId || '', billed: false, createdAt: nowIso(), updatedAt: nowIso(), deadlineAt: addSecondsIso(config.timeoutSeconds || 120),
+        id: makeId('sess'), sessionTokenHash: hashToken(sessionToken), sessionTokenEncrypted: encryptSecret(sessionToken), cdk: c.code, accountId: account.id, orderid, phone,
+        country: account.country, service: account.service, pool: account.pool, status: 'waiting', counted: false,
+        reused: false, clientId: opts.clientId || null, externalId: opts.externalId || '', billed: false, createdAt: nowIso(), updatedAt: nowIso(), deadlineAt: addSecondsIso(config.timeoutSeconds || 120),
       };
-      if (!opts.virtualCdk) { c.status = 'reserved'; c.reservedAt = session.createdAt; c.reservedSessionId = session.id; delete c.reservedAccountId; }
+      if (!opts.virtualCdk) { c.status = 'reserved'; c.reservedAt = session.createdAt; c.reservedSessionId = session.id; }
+      wdb.accounts.unshift(account);
       wdb.sessions.unshift(session);
-      wdb.logs.unshift({ id: makeId('log'), type: 'reuse', sessionId: session.id, accountId: a.id, createdAt: nowIso() });
-      return { session, sessionToken, account: a, reused: true };
+      wdb.logs.unshift({ id: makeId('log'), type: 'purchase', sessionId: session.id, accountId: account.id, poolUsed, triedPools: purchaseResult.triedPools, upstream, createdAt: nowIso() });
+      return { session, sessionToken, account, reused: false };
     });
+  };
+
+  if (priority === 'manual_only') {
+    const manualPoolAccount = reserveFromManualPool();
+    if (manualPoolAccount) return manualPoolAccount;
+    throw Object.assign(new Error('自有号池暂无可用号码'), { status: 503, publicMessage: true });
   }
 
-  const purchaseResult = await purchaseSmsAuto(config);
-  const upstream = purchaseResult.upstream;
-  const poolUsed = purchaseResult.poolUsed;
-  const orderid = String(extractOrderId(upstream) || '');
-  const phone = String(extractPhone(upstream) || '');
-  if (!orderid) {
-    const err = new Error('上游未返回 orderid');
-    err.status = 502;
-    err.details = upstream;
-    throw err;
-  }
+  if (priority === 'sms_first' || priority === 'sms_only') return reserveFromSmsPool();
 
-  return transact(wdb => {
-    const c = opts.virtualCdk || wdb.cdks.find(x => x.code.toUpperCase() === cdkCode);
-    if (!c || (c.status || 'active') !== 'active') throw Object.assign(new Error('CDK 不可用'), { status: 400 });
-    const account = {
-      id: makeId('acct'), orderid, phone, country: String(config.country), service: String(config.service), pool: String(poolUsed || config.pool || ''),
-      useCount: 0, maxUses: Number(config.maxAccountUses || 3), status: 'waiting', source: 'new', upstream,
-      createdAt: nowIso(), updatedAt: nowIso(), lastMessageAt: null,
-    };
-    const sessionToken = randomToken();
-    const session = {
-      id: makeId('sess'), sessionTokenHash: hashToken(sessionToken), sessionTokenEncrypted: encryptSecret(sessionToken), cdk: c.code, accountId: account.id, orderid, phone,
-      country: account.country, service: account.service, pool: account.pool, status: 'waiting', counted: false,
-      reused: false, clientId: opts.clientId || null, externalId: opts.externalId || '', billed: false, createdAt: nowIso(), updatedAt: nowIso(), deadlineAt: addSecondsIso(config.timeoutSeconds || 120),
-    };
-    if (!opts.virtualCdk) { c.status = 'reserved'; c.reservedAt = session.createdAt; c.reservedSessionId = session.id; }
-    wdb.accounts.unshift(account);
-    wdb.sessions.unshift(session);
-    wdb.logs.unshift({ id: makeId('log'), type: 'purchase', sessionId: session.id, accountId: account.id, poolUsed, triedPools: purchaseResult.triedPools, upstream, createdAt: nowIso() });
-    return { session, sessionToken, account, reused: false };
-  });
+  const manualPoolAccount = reserveFromManualPool();
+  if (manualPoolAccount) return manualPoolAccount;
+
+  return reserveFromSmsPool();
 }
 
 app.get('/api/health', (req, res) => res.json({ success: 1, time: nowIso() }));
@@ -1278,11 +1460,122 @@ app.post('/api/v1/number', requireApiClient, async (req, res, next) => {
         return res.json({ success: 1, ...apiSessionPayload(existing, account, client), sessionToken, idempotent: true, pollIntervalSeconds: db.config.pollIntervalSeconds });
       }
     }
+    const accountId = String(req.body?.accountId || '').trim();
+    const phoneQuery = normalizePhoneSearch(req.body?.phone || '');
+    if (accountId || phoneQuery) {
+      const { account, candidates, availability, poolType } = findApiSpecificAccount(db, { accountId, phone: phoneQuery, ignoreCooldown: !!req.body?.ignoreCooldown });
+      if (!account) {
+        auditApi(req, 'api.number_specific_rejected', { reason: availability.code, accountId, phone: phoneQuery, candidates: candidates.length, poolType });
+        return res.status(404).json({ success: 0, code: availability.code || 'NUMBER_NOT_FOUND', message: availability.message || '未找到可继续接码的号码' });
+      }
+      const virtualCdk = { code: `API-${client.id}-${makeId('req')}`, status: 'active' };
+      const allocated = await allocateSpecificAccount(virtualCdk.code, account.id, { virtualCdk, clientId: client.id, externalId, ignoreCooldown: !!req.body?.ignoreCooldown, req });
+      transact(wdb => audit(wdb, req, 'api.number_specific_allocated', { clientId: client.id, sessionId: allocated.session.id, accountId: allocated.account.id, externalId, reused: allocated.reused, phone: allocated.account.phone, poolType: accountPoolType(allocated.account) }));
+      return res.json(apiNumberResponse(allocated));
+    }
     const virtualCdk = { code: `API-${client.id}-${makeId('req')}`, status: 'active' };
     const allocated = await allocateSession(virtualCdk.code, { virtualCdk, clientId: client.id, externalId });
     transact(wdb => audit(wdb, req, 'api.number_allocated', { clientId: client.id, sessionId: allocated.session.id, accountId: allocated.account.id, externalId, reused: allocated.reused, phone: allocated.account.phone, country: allocated.account.country, service: allocated.account.service, pool: allocated.account.pool }));
     res.json(apiNumberResponse(allocated));
   } catch (e) { auditApi(req, 'api.number_error', { message: e.message, status: e.status || 500, code: e.code || '', details: e.details || null }); next(e); }
+});
+
+app.get('/api/v1/numbers/search', requireApiClient, (req, res, next) => {
+  try {
+    const q = normalizePhoneSearch(req.query.phone || req.query.q || '');
+    if (!q || q.length < 3) return res.status(400).json({ success: 0, code: 'INVALID_PHONE_QUERY', message: '请输入至少 3 位号码数字' });
+    const db = readDb();
+    const config = getRuntimeConfig(db);
+    const limit = Math.min(Math.max(Number(req.query.limit || 20), 1), 50);
+    const onlyAvailable = String(req.query.availableOnly ?? 'true').toLowerCase() !== 'false';
+    const items = (db.accounts || [])
+      .filter(a => normalizePhoneSearch(a.phone).includes(q))
+      .map(a => publicApiAccount(a, config))
+      .filter(a => !onlyAvailable || a.available)
+      .sort((a, b) => Number(b.available) - Number(a.available) || String(b.updatedAt || '').localeCompare(String(a.updatedAt || '')))
+      .slice(0, limit);
+    auditApi(req, 'api.number_search', { query: q, results: items.length, availableOnly: onlyAvailable });
+    res.json({ success: 1, numbers: items });
+  } catch (e) { auditApi(req, 'api.number_search_error', { message: e.message, status: e.status || 500, code: e.code || '' }); next(e); }
+});
+
+app.post('/api/v1/number/continue', requireApiClient, async (req, res, next) => {
+  try {
+    const db = readDb();
+    const client = db.clients.find(c => c.id === req.apiClient.id);
+    try { ensureClientBalance(client); } catch (e) { auditApi(req, 'api.number_continue_rejected', { reason: e.code || 'INSUFFICIENT_BALANCE', balance: Number(client.balance || 0), pricePerSuccess: Number(client.pricePerSuccess || 1) }); throw e; }
+
+    const externalId = String(req.body?.externalId || '').trim().slice(0, 120);
+    if (externalId) {
+      const existing = db.sessions.find(s => s.clientId === client.id && s.externalId === externalId && ['waiting', 'received'].includes(String(s.status || '')));
+      if (existing) {
+        const account = db.accounts.find(a => a.id === existing.accountId);
+        const sessionToken = recoverOrRotateSessionToken(existing.id, req);
+        auditApi(req, 'api.number_continue_idempotent', { sessionId: existing.id, accountId: existing.accountId, externalId, status: existing.status, tokenRecovered: !!sessionToken });
+        return res.json({ success: 1, ...apiSessionPayload(existing, account, client), sessionToken, idempotent: true, pollIntervalSeconds: db.config.pollIntervalSeconds });
+      }
+    }
+
+    const accountId = String(req.body?.accountId || '').trim();
+    const phoneQuery = normalizePhoneSearch(req.body?.phone || '');
+    if (!accountId && !phoneQuery) return res.status(400).json({ success: 0, code: 'ACCOUNT_OR_PHONE_REQUIRED', message: '请输入 accountId 或 phone' });
+
+    const fresh = readDb();
+    const { account, candidates, availability, poolType } = findApiSpecificAccount(fresh, { accountId, phone: phoneQuery, ignoreCooldown: !!req.body?.ignoreCooldown });
+    if (!account) {
+      auditApi(req, 'api.number_continue_rejected', { reason: availability.code, accountId, phone: phoneQuery, candidates: candidates.length, poolType });
+      return res.status(404).json({ success: 0, code: availability.code || 'NUMBER_NOT_FOUND', message: availability.message || '未找到可继续接码的号码' });
+    }
+
+    const virtualCdk = { code: `API-${client.id}-${makeId('req')}`, status: 'active' };
+    const allocated = await allocateSpecificAccount(virtualCdk.code, account.id, { virtualCdk, clientId: client.id, externalId, ignoreCooldown: !!req.body?.ignoreCooldown, req });
+    auditApi(req, 'api.number_continue_allocated', { sessionId: allocated.session.id, accountId: allocated.account.id, externalId, phone: allocated.account.phone, reused: allocated.reused, poolType: accountPoolType(allocated.account) });
+    res.json(apiNumberResponse(allocated));
+  } catch (e) { auditApi(req, 'api.number_continue_error', { message: e.message, status: e.status || 500, code: e.code || '', accountId: req.body?.accountId || '', phone: req.body?.phone || '' }); next(e); }
+});
+
+app.post('/api/v1/number/status', requireApiClient, (req, res, next) => {
+  try {
+    const action = String(req.body?.action || 'disable').toLowerCase();
+    if (!['disable', 'enable'].includes(action)) return res.status(400).json({ success: 0, code: 'INVALID_ACTION', message: 'action 只能是 disable 或 enable' });
+    const accountId = String(req.body?.accountId || '').trim();
+    const phoneQuery = normalizePhoneSearch(req.body?.phone || '');
+    if (!accountId && !phoneQuery) return res.status(400).json({ success: 0, code: 'ACCOUNT_OR_PHONE_REQUIRED', message: '请输入 accountId 或 phone' });
+
+    const result = transact(db => {
+      const matches = accountId
+        ? (db.accounts || []).filter(a => a.id === accountId)
+        : (db.accounts || []).filter(a => normalizePhoneSearch(a.phone) === phoneQuery || normalizePhoneSearch(a.phone).endsWith(phoneQuery));
+      if (!matches.length) return { notFound: true };
+      const row = matches
+        .slice()
+        .sort((a, b) => String(b.updatedAt || '').localeCompare(String(a.updatedAt || '')))[0];
+      if (action === 'disable') {
+        if (BUSY_ACCOUNT_STATUSES.has(String(row.status || ''))) row.disabledPending = true;
+        else row.status = 'disabled';
+        row.disabledBy = `api:${req.apiClient.id}`;
+        row.disabledReason = String(req.body?.reason || '').slice(0, 200);
+      } else if (Number(row.useCount || 0) >= accountMaxUses(row, db.config)) {
+        row.status = 'used_up';
+        delete row.disabledPending;
+        delete row.disabledBy;
+        delete row.disabledReason;
+      } else {
+        row.status = 'available';
+        row.resendCooldownUntil = null;
+        delete row.resendError;
+        delete row.disabledPending;
+        delete row.disabledBy;
+        delete row.disabledReason;
+      }
+      row.updatedAt = nowIso();
+      audit(db, req, action === 'disable' ? 'api.number_disable' : 'api.number_enable', { clientId: req.apiClient.id, accountId: row.id, phone: row.phone, reason: req.body?.reason || '' });
+      return { account: publicApiAccount(row, db.config) };
+    });
+    if (result.notFound) return res.status(404).json({ success: 0, code: 'NUMBER_NOT_FOUND', message: '号码不存在' });
+    auditApi(req, action === 'disable' ? 'api.number_disable' : 'api.number_enable', { accountId: result.account.id, phone: result.account.phone });
+    res.json({ success: 1, action, account: result.account });
+  } catch (e) { auditApi(req, 'api.number_status_error', { message: e.message, status: e.status || 500, code: e.code || '', accountId: req.body?.accountId || '', phone: req.body?.phone || '' }); next(e); }
 });
 
 app.post('/api/v1/session/check', requireApiClient, async (req, res, next) => {
@@ -1310,6 +1603,7 @@ app.post('/api/v1/session/check', requireApiClient, async (req, res, next) => {
         const a = wdb.accounts.find(x => x.id === account.id);
         if (s) { s.status = 'timeout'; s.updatedAt = nowIso(); }
         if (a && isManualPoolAccount(a) && Number(a.useCount || 0) < accountMaxUses(a, wdb.config)) { cooldownAccount(a, wdb.config); }
+        else if (a && a.disabledPending) { cooldownAccount(a, wdb.config); }
         else if (a && Number(a.useCount || 0) === 0 && !session.reused) { a.status = 'failed'; a.updatedAt = nowIso(); }
         else if (a && session.reused) { cooldownReusedAccount(a, wdb.config); }
         audit(wdb, req, 'api.session_timeout', { clientId: req.apiClient.id, sessionId, accountId: account.id, phone: account.phone });
@@ -1389,6 +1683,7 @@ app.post('/api/v1/session/change-number', requireApiClient, async (req, res, nex
       const a = oldAccount ? db.accounts.find(x => x.id === oldAccount.id) : null;
       if (s) { s.status = 'changed'; s.updatedAt = nowIso(); }
       if (a && isManualPoolAccount(a) && Number(a.useCount || 0) < accountMaxUses(a, db.config)) { cooldownAccount(a, db.config); }
+      else if (a && a.disabledPending) { cooldownAccount(a, db.config); }
       else if (a && Number(a.useCount || 0) === 0 && !s.reused) { a.status = 'failed'; a.updatedAt = nowIso(); }
       else if (a && s?.reused) { cooldownReusedAccount(a, db.config); }
       audit(db, req, 'api.change_number', { clientId: client.id, sessionId: oldId, accountId: oldAccount?.id, phone: oldAccount?.phone });
@@ -1469,6 +1764,7 @@ app.post('/api/session/check', requireSameOrigin, async (req, res, next) => {
         if (s) { s.status = 'timeout'; s.updatedAt = nowIso(); }
         if (c && c.status === 'reserved' && c.reservedSessionId === sessionId) { c.status = 'active'; c.reservedSessionId = null; c.reservedAt = null; }
         if (a && isManualPoolAccount(a) && Number(a.useCount || 0) < accountMaxUses(a, wdb.config)) { cooldownAccount(a, wdb.config); }
+        else if (a && a.disabledPending) { cooldownAccount(a, wdb.config); }
         else if (a && Number(a.useCount || 0) === 0 && !session.reused) { a.status = 'failed'; a.updatedAt = nowIso(); }
         else if (a && session.reused) { cooldownReusedAccount(a, wdb.config); }
         audit(wdb, req, 'user.session_timeout', { sessionId, accountId: account.id, phone: account.phone });
@@ -1549,6 +1845,7 @@ app.post('/api/session/change-number', requireSameOrigin, async (req, res, next)
       const c = oldSession.clientId ? null : db.cdks.find(x => x.code.toUpperCase() === oldSession.cdk.toUpperCase());
       if (c && c.status === 'reserved' && c.reservedSessionId === oldId) { c.status = 'active'; c.reservedSessionId = null; c.reservedAt = null; }
       if (a && isManualPoolAccount(a) && Number(a.useCount || 0) < accountMaxUses(a, db.config)) { cooldownAccount(a, db.config); }
+      else if (a && a.disabledPending) { cooldownAccount(a, db.config); }
       else if (a && Number(a.useCount || 0) === 0 && !s.reused) { a.status = 'failed'; a.updatedAt = nowIso(); }
       else if (a && s?.reused) { cooldownReusedAccount(a, db.config); }
       db.logs.unshift({ id: makeId('log'), type: 'change_number', sessionId: oldId, accountId: oldAccount?.id, createdAt: nowIso() });

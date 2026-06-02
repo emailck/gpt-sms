@@ -55,11 +55,20 @@ Content-Type: application/json
 
 ```json
 {
-  "externalId": "your_order_10001"
+  "externalId": "your_order_10001",
+  "phone": "+1234567890"
 }
 ```
 
 `externalId` 可选。传入后具有幂等效果：同一个客户、同一个 `externalId`，如果已有 `waiting` 或 `received` 会话，会直接返回已有会话和可用于查码的 `sessionToken`，避免重复占号。
+
+`phone` 可选。传入后表示指定手机号接码，调用方不需要知道号码来自哪种号码池：
+
+- 如果该号码是自有号码池号码，系统会直接分配该号码，并通过该号码的 `smsUrl` 查询短信。
+- 如果该号码是 SMSPool 历史号码，系统会自动调用上游 `resend`，然后等待新短信。
+- 如果不传 `phone`，系统按后台配置的号码池优先级自动分配号码。
+
+也可以传 `accountId` 精确指定内部号码记录；第三方通常只需要传 `phone`。
 
 响应：
 
@@ -69,6 +78,8 @@ Content-Type: application/json
   "sessionId": "sess_xxx",
   "sessionToken": "tok_xxx",
   "phone": "+1234567890",
+  "poolType": "manual_pool",
+  "numberSource": "manual_pool",
   "status": "waiting",
   "received": false,
   "reused": false,
@@ -168,6 +179,55 @@ Content-Type: application/json
 ```
 
 响应同“获取号码”。
+
+## 5. 指定手机号继续接码
+
+如果第三方已经知道要继续使用的手机号，可以直接调用：
+
+```http
+POST /api/v1/number/continue
+Authorization: Bearer <API_KEY>
+Content-Type: application/json
+```
+
+请求：
+
+```json
+{
+  "phone": "+1234567890",
+  "externalId": "your_order_10002"
+}
+```
+
+响应同“获取号码”。系统会自动判断号码池类型：
+
+- `poolType: "manual_pool"`：自有号码池。
+- `poolType: "smspool"`：SMSPool 历史号码，通过上游 resend 继续接码。
+
+## 6. 搜索可用号码
+
+```http
+GET /api/v1/numbers/search?phone=7890
+Authorization: Bearer <API_KEY>
+```
+
+响应：
+
+```json
+{
+  "success": 1,
+  "numbers": [
+    {
+      "id": "acct_xxx",
+      "phone": "+1234567890",
+      "poolType": "manual_pool",
+      "source": "manual_pool",
+      "status": "available",
+      "available": true
+    }
+  ]
+}
+```
 
 ## 错误响应
 
