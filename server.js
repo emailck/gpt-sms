@@ -792,6 +792,13 @@ function accountCanContinue(account, config, { ignoreCooldown = false } = {}) {
   return { ok: true };
 }
 
+function accountCanForceUse(account) {
+  if (!account) return { ok: false, code: 'NUMBER_NOT_FOUND', message: '号码不存在' };
+  if (!isManualPoolAccount(account) && !account.orderid) return { ok: false, code: 'ORDER_NOT_FOUND', message: '原号码缺少订单号，无法继续接码' };
+  if (isManualPoolAccount(account) && !account.smsUrl) return { ok: false, code: 'SMS_URL_NOT_FOUND', message: '自有号码缺少短信查询URL' };
+  return { ok: true };
+}
+
 function publicApiAccount(account, config = readDb().config) {
   const availability = accountCanContinue(account, config);
   return {
@@ -834,7 +841,7 @@ function phoneMatchesAccount(account, phoneQuery) {
   return accountPhone === q || accountPhone.endsWith(q);
 }
 
-function findApiSpecificAccount(db, { accountId = '', phone = '', ignoreCooldown = false } = {}) {
+function findApiSpecificAccount(db, { accountId = '', phone = '', ignoreCooldown = false, forceUse = false } = {}) {
   const phoneQuery = normalizePhoneSearch(phone);
   const candidates = accountId
     ? (db.accounts || []).filter(a => String(a.id || '') === String(accountId))
@@ -844,7 +851,7 @@ function findApiSpecificAccount(db, { accountId = '', phone = '', ignoreCooldown
     .map(a => ({
       account: a,
       exact: phoneQuery ? Number(normalizePhoneSearch(a.phone) === phoneQuery) : 1,
-      availability: accountCanContinue(a, db.config, { ignoreCooldown }),
+      availability: forceUse ? accountCanForceUse(a) : accountCanContinue(a, db.config, { ignoreCooldown }),
       lastUseTime: accountLastSuccessfulUseTime(db, a),
     }))
     .sort((a, b) =>
@@ -1105,7 +1112,9 @@ async function allocateSpecificAccount(cdkCode, accountId, opts = {}) {
     const c = opts.virtualCdk || wdb.cdks.find(x => x.code.toUpperCase() === cdkCode);
     if (!c || (c.status || 'active') !== 'active') throw Object.assign(new Error('CDK 不可用'), { status: 400, code: 'CDK_UNAVAILABLE' });
     const a = wdb.accounts.find(x => x.id === accountId);
-    const availability = accountCanContinue(a, wdb.config, { ignoreCooldown: !!opts.ignoreCooldown });
+    const availability = opts.forceUse
+      ? accountCanForceUse(a)
+      : accountCanContinue(a, wdb.config, { ignoreCooldown: !!opts.ignoreCooldown });
     if (!availability.ok) throw Object.assign(new Error(availability.message), { status: 409, code: availability.code });
 
     const ts = nowIso();
@@ -1463,14 +1472,15 @@ app.post('/api/v1/number', requireApiClient, async (req, res, next) => {
     const accountId = String(req.body?.accountId || '').trim();
     const phoneQuery = normalizePhoneSearch(req.body?.phone || '');
     if (accountId || phoneQuery) {
-      const { account, candidates, availability, poolType } = findApiSpecificAccount(db, { accountId, phone: phoneQuery, ignoreCooldown: !!req.body?.ignoreCooldown });
+      const forceUse = !!phoneQuery && req.body?.forceUse !== false;
+      const { account, candidates, availability, poolType } = findApiSpecificAccount(db, { accountId, phone: phoneQuery, ignoreCooldown: !!req.body?.ignoreCooldown, forceUse });
       if (!account) {
-        auditApi(req, 'api.number_specific_rejected', { reason: availability.code, accountId, phone: phoneQuery, candidates: candidates.length, poolType });
+        auditApi(req, 'api.number_specific_rejected', { reason: availability.code, accountId, phone: phoneQuery, candidates: candidates.length, poolType, forceUse });
         return res.status(404).json({ success: 0, code: availability.code || 'NUMBER_NOT_FOUND', message: availability.message || '未找到可继续接码的号码' });
       }
       const virtualCdk = { code: `API-${client.id}-${makeId('req')}`, status: 'active' };
-      const allocated = await allocateSpecificAccount(virtualCdk.code, account.id, { virtualCdk, clientId: client.id, externalId, ignoreCooldown: !!req.body?.ignoreCooldown, req });
-      transact(wdb => audit(wdb, req, 'api.number_specific_allocated', { clientId: client.id, sessionId: allocated.session.id, accountId: allocated.account.id, externalId, reused: allocated.reused, phone: allocated.account.phone, poolType: accountPoolType(allocated.account) }));
+      const allocated = await allocateSpecificAccount(virtualCdk.code, account.id, { virtualCdk, clientId: client.id, externalId, ignoreCooldown: !!req.body?.ignoreCooldown, forceUse, req });
+      transact(wdb => audit(wdb, req, 'api.number_specific_allocated', { clientId: client.id, sessionId: allocated.session.id, accountId: allocated.account.id, externalId, reused: allocated.reused, phone: allocated.account.phone, poolType: accountPoolType(allocated.account), forceUse }));
       return res.json(apiNumberResponse(allocated));
     }
     const virtualCdk = { code: `API-${client.id}-${makeId('req')}`, status: 'active' };
@@ -1521,15 +1531,16 @@ app.post('/api/v1/number/continue', requireApiClient, async (req, res, next) => 
     if (!accountId && !phoneQuery) return res.status(400).json({ success: 0, code: 'ACCOUNT_OR_PHONE_REQUIRED', message: '请输入 accountId 或 phone' });
 
     const fresh = readDb();
-    const { account, candidates, availability, poolType } = findApiSpecificAccount(fresh, { accountId, phone: phoneQuery, ignoreCooldown: !!req.body?.ignoreCooldown });
+    const forceUse = !!phoneQuery && req.body?.forceUse !== false;
+    const { account, candidates, availability, poolType } = findApiSpecificAccount(fresh, { accountId, phone: phoneQuery, ignoreCooldown: !!req.body?.ignoreCooldown, forceUse });
     if (!account) {
-      auditApi(req, 'api.number_continue_rejected', { reason: availability.code, accountId, phone: phoneQuery, candidates: candidates.length, poolType });
+      auditApi(req, 'api.number_continue_rejected', { reason: availability.code, accountId, phone: phoneQuery, candidates: candidates.length, poolType, forceUse });
       return res.status(404).json({ success: 0, code: availability.code || 'NUMBER_NOT_FOUND', message: availability.message || '未找到可继续接码的号码' });
     }
 
     const virtualCdk = { code: `API-${client.id}-${makeId('req')}`, status: 'active' };
-    const allocated = await allocateSpecificAccount(virtualCdk.code, account.id, { virtualCdk, clientId: client.id, externalId, ignoreCooldown: !!req.body?.ignoreCooldown, req });
-    auditApi(req, 'api.number_continue_allocated', { sessionId: allocated.session.id, accountId: allocated.account.id, externalId, phone: allocated.account.phone, reused: allocated.reused, poolType: accountPoolType(allocated.account) });
+    const allocated = await allocateSpecificAccount(virtualCdk.code, account.id, { virtualCdk, clientId: client.id, externalId, ignoreCooldown: !!req.body?.ignoreCooldown, forceUse, req });
+    auditApi(req, 'api.number_continue_allocated', { sessionId: allocated.session.id, accountId: allocated.account.id, externalId, phone: allocated.account.phone, reused: allocated.reused, poolType: accountPoolType(allocated.account), forceUse });
     res.json(apiNumberResponse(allocated));
   } catch (e) { auditApi(req, 'api.number_continue_error', { message: e.message, status: e.status || 500, code: e.code || '', accountId: req.body?.accountId || '', phone: req.body?.phone || '' }); next(e); }
 });

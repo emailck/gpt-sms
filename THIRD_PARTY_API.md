@@ -62,13 +62,22 @@ Content-Type: application/json
 
 `externalId` 可选。传入后具有幂等效果：同一个客户、同一个 `externalId`，如果已有 `waiting` 或 `received` 会话，会直接返回已有会话和可用于查码的 `sessionToken`，避免重复占号。
 
-`phone` 可选。传入后表示指定手机号接码，调用方不需要知道号码来自哪种号码池：
+`phone` 可选。传入后表示指定手机号接码，调用方不需要知道号码来自哪种号码池。指定手机号时默认 `forceUse=true`，即只要系统里存在该手机号，就会尝试使用该号码接码，不会因为冷却、禁用、已达使用次数或当前状态不可用而自动换成其他号码：
 
 - 如果该号码是自有号码池号码，系统会直接分配该号码，并通过该号码的 `smsUrl` 查询短信。
 - 如果该号码是 SMSPool 历史号码，系统会自动调用上游 `resend`，然后等待新短信。
 - 如果不传 `phone`，系统按后台配置的号码池优先级自动分配号码。
 
 也可以传 `accountId` 精确指定内部号码记录；第三方通常只需要传 `phone`。
+
+如果需要恢复严格可用性检查，可显式传：
+
+```json
+{
+  "phone": "+1234567890",
+  "forceUse": false
+}
+```
 
 响应：
 
@@ -203,6 +212,8 @@ Content-Type: application/json
 
 - `poolType: "manual_pool"`：自有号码池。
 - `poolType: "smspool"`：SMSPool 历史号码，通过上游 resend 继续接码。
+
+指定手机号时默认强制使用该号码；如果上游 SMSPool 拒绝 resend，接口会返回上游错误，不会自动换成其他号码。
 
 ## 6. 搜索可用号码
 
